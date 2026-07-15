@@ -289,10 +289,10 @@ st.dataframe(
             "Clics":       "{:,.0f}",
             "Alcance":     "{:,.0f}",
         })
-        .applymap(lambda v: "color: #2ecc71" if isinstance(v, float) and v > 5 else
+        .map(lambda v: "color: #2ecc71" if isinstance(v, float) and v > 5 else
                             "color: #e74c3c" if isinstance(v, float) and v < 3 else "",
                   subset=["CTR"])
-        .applymap(lambda v: "color: #e74c3c" if isinstance(v, float) and v > 4 else "",
+        .map(lambda v: "color: #e74c3c" if isinstance(v, float) and v > 4 else "",
                   subset=["Frecuencia"]),
     use_container_width=True,
     hide_index=True,
