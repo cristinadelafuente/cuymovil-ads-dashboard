@@ -57,6 +57,33 @@ DATE_OPTIONS = {
 
 INSIGHT_FIELDS = ["spend", "impressions", "clicks", "ctr", "cpc", "reach", "frequency"]
 
+
+# ── Manejo de errores de la Meta API ──────────────────────────────────────────
+from facebook_business.exceptions import FacebookRequestError
+
+
+class MetaAPIError(RuntimeError):
+    """Error de la Meta API traducido a mensaje accionable."""
+
+
+def _translate_fb_error(e: "FacebookRequestError") -> MetaAPIError:
+    code = e.api_error_code()
+    sub = e.api_error_subcode()
+    msg = e.api_error_message() or str(e)
+    if code == 190:
+        hint = ("El ACCESS_TOKEN caducó o fue revocado. Genera uno nuevo con "
+                "alcance ads_read y actualízalo en Settings → Secrets.")
+    elif code in (10, 200, 294):
+        hint = ("El token no tiene permiso ads_read sobre esta cuenta, o la "
+                "cuenta no es accesible con este usuario.")
+    elif code in (4, 17, 613):
+        hint = "Límite de tasa de la Meta API. Reintenta en unos minutos."
+    elif code == 100:
+        hint = "Parámetro inválido (revisa el ID de cuenta o el date_preset)."
+    else:
+        hint = "Revisa el token y los permisos de la cuenta."
+    return MetaAPIError(f"Meta API error {code}/{sub}: {msg} — {hint}")
+
 # ── API helpers ───────────────────────────────────────────────────────────────
 def init_api():
     if APP_SECRET:
@@ -67,23 +94,29 @@ def init_api():
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_campaigns(account_id: str, date_preset: str) -> pd.DataFrame:
     init_api()
-    account   = AdAccount(account_id)
-    campaigns = account.get_campaigns(fields=[
-        Campaign.Field.id,
-        Campaign.Field.name,
-        Campaign.Field.effective_status,
-        Campaign.Field.objective,
-        Campaign.Field.daily_budget,
-        Campaign.Field.bid_strategy,
-    ])
+    try:
+        account   = AdAccount(account_id)
+        campaigns = account.get_campaigns(fields=[
+            Campaign.Field.id,
+            Campaign.Field.name,
+            Campaign.Field.effective_status,
+            Campaign.Field.objective,
+            Campaign.Field.daily_budget,
+            Campaign.Field.bid_strategy,
+        ])
+    except FacebookRequestError as e:
+        raise _translate_fb_error(e) from e
 
     rows = []
     for c in campaigns:
         status = c.get(Campaign.Field.effective_status, "")
-        insights = c.get_insights(
-            fields=INSIGHT_FIELDS,
-            params={"date_preset": date_preset},
-        )
+        try:
+            insights = c.get_insights(
+                fields=INSIGHT_FIELDS,
+                params={"date_preset": date_preset},
+            )
+        except FacebookRequestError as e:
+            raise _translate_fb_error(e) from e
         if not insights:
             continue
         ins = insights[0]
@@ -231,8 +264,14 @@ if not ACCESS_TOKEN:
     st.stop()
 
 # Carga de datos
-with st.spinner("Cargando datos de Meta Ads..."):
-    df = fetch_campaigns(account_id, date_preset)
+try:
+    with st.spinner("Cargando datos de Meta Ads..."):
+        df = fetch_campaigns(account_id, date_preset)
+except MetaAPIError as e:
+    st.error(f"No se pudieron cargar los datos de Meta Ads.\n\n{e}")
+    st.info("Si el token caducó, actualiza ACCESS_TOKEN en Settings → Secrets "
+            "y pulsa 🔄 Actualizar datos.")
+    st.stop()
 
 if df.empty:
     st.info("No hay datos disponibles para este período y cuenta.")
