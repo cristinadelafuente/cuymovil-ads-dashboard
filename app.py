@@ -28,6 +28,18 @@ ACCESS_TOKEN  = get_secret("ACCESS_TOKEN")
 APP_ID        = get_secret("APP_ID") or "1605641477375351"
 APP_SECRET    = get_secret("APP_SECRET")
 
+# ── Modo de operación ─────────────────────────────────────────────────────────
+# FASE 0.5 / 1: el sistema es ESTRICTAMENTE SOLO LECTURA.
+# La escritura por API (pausar campañas, cambiar presupuesto) queda reservada
+# a la Fase 2, detrás de un flujo de aprobación humana y en entorno demo.
+# Para habilitar escritura hay que fijar explícitamente READ_ONLY=false en secrets.
+def _as_bool(v, default=True):
+    if v is None or v == "":
+        return default
+    return str(v).strip().lower() not in ("0", "false", "no", "off")
+
+READ_ONLY = _as_bool(get_secret("READ_ONLY"), default=True)
+
 # ── Constantes ───────────────────────────────────────────────────────────────
 ACCOUNTS = {
     "Norte Digital [NDPE] — Cuy Móvil": "act_4207138246212675",
@@ -100,13 +112,26 @@ def fetch_campaigns(account_id: str, date_preset: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # ── Acciones sobre campañas ───────────────────────────────────────────────────
+class WriteBlockedError(RuntimeError):
+    """Se lanza cuando se intenta una escritura estando en modo solo-lectura."""
+
+def _guard_write(op: str):
+    if READ_ONLY:
+        raise WriteBlockedError(
+            f"Operación de escritura '{op}' bloqueada: el sistema está en modo "
+            f"SOLO LECTURA (Fase 0.5/1). La escritura por API se habilita en la "
+            f"Fase 2 con aprobación humana."
+        )
+
 def pause_campaign(campaign_id: str):
+    _guard_write("pause_campaign")
     init_api()
     Campaign(campaign_id).api_update(
         fields=[], params={"status": Campaign.Status.paused}
     )
 
 def set_daily_budget(campaign_id: str, budget_usd: float):
+    _guard_write("set_daily_budget")
     init_api()
     Campaign(campaign_id).api_update(
         fields=[], params={"daily_budget": str(int(budget_usd * 100))}
@@ -195,7 +220,10 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.caption("Los cambios ejecutados son inmediatos y reales.")
+    if READ_ONLY:
+        st.success("🔒 Modo SOLO LECTURA (Fase 0.5). No se ejecuta ningún cambio real.")
+    else:
+        st.warning("⚠️ Modo ESCRITURA activo — los cambios ejecutados son inmediatos y reales.")
 
 # Validación de token
 if not ACCESS_TOKEN:
@@ -338,7 +366,14 @@ else:
                 with col_btn:
                     btn_label = ACTION_LABEL.get(action, "Ejecutar")
 
-                    if action == "REFRESH_CREATIVE":
+                    if READ_ONLY and action in ("PAUSE", "INCREASE_BUDGET", "DECREASE_BUDGET"):
+                        st.button(
+                            btn_label, key=f"btn_{i}", disabled=True,
+                            help="Bloqueado en modo SOLO LECTURA (Fase 0.5). La ejecución se habilita en Fase 2 con aprobación humana.",
+                        )
+                        st.caption("🔒 Recomendación registrada — ejecución deshabilitada en Fase 0.5.")
+
+                    elif action == "REFRESH_CREATIVE":
                         st.info("Acción manual — ve a Ads Manager para actualizar la creatividad.")
 
                     elif action == "PAUSE":
