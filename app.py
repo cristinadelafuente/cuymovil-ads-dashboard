@@ -186,7 +186,7 @@ def get_suggestions(df: pd.DataFrame) -> list:
     suggestions.sort(key=lambda x: order.get(x["urgency"], 3))
     return suggestions[:5]
 
-# ── IA de segmentación (basada en reglas) ─────────────────────────────────────
+# ── IA de segmentación (basada en reglas, granularidad fina) ──────────────────
 def ai_suggest_segmentation(description: str) -> dict:
     desc = description.lower()
     result = {
@@ -194,36 +194,67 @@ def ai_suggest_segmentation(description: str) -> dict:
         "age_min": 18,
         "age_max": 45,
         "gender": "all",
-        "interest_keywords": [],
+        "interest_keywords": [],   # términos a resolver contra intereses reales de Meta
+        "brand_keywords": [],      # marcas mencionadas — se resuelven aparte
         "notes": [],
+        "narrow_logic": False,     # si True, se sugiere combinar intereses en AND (audiencia más chica)
     }
 
-    # Competencia / páginas de terceros
-    if any(kw in desc for kw in ["competencia", "competidor", "otras marcas", "páginas similares",
-                                  "paginas similares", "claro", "entel", "bitel", "movistar",
-                                  "interactuan", "interactúan"]):
-        result["notes"].append("⚠️ **Meta no permite apuntar directamente a seguidores de páginas de competidores** (restricción de privacidad). Alternativas:")
-        result["notes"].append("→ **Intereses por marca**: busca 'Claro', 'Entel', 'Bitel', 'Movistar' abajo — si aparecen como intereses, úsalos.")
-        result["notes"].append("→ **Lookalike audience**: sube tu lista de clientes en Meta y encontrará perfiles similares a los de la competencia.")
-        result["notes"].append("→ **Intereses por industria**: 'Telefonía móvil', 'Smartphones', 'Telecomunicaciones'.")
-        result["interest_keywords"].extend(["Telefonía móvil", "Smartphones", "Telecomunicaciones", "4G LTE"])
+    # Detección de marcas específicas de competencia (targeting más fino: la marca exacta, no la categoría)
+    brand_map = {
+        "claro":     "Claro",
+        "entel":     "Entel",
+        "bitel":     "Bitel",
+        "movistar":  "Movistar",
+        "wom":       "WOM",
+    }
+    mentioned_brands = [name for kw, name in brand_map.items() if kw in desc]
+    if mentioned_brands:
+        result["brand_keywords"].extend(mentioned_brands)
+        result["notes"].append(
+            "⚠️ **Meta no permite apuntar directamente a seguidores de páginas de competidores.** "
+            f"En su lugar se buscarán los intereses reales de marca para {', '.join(mentioned_brands)} "
+            "(cuando Meta los tenga catalogados como interés) — esto es más fino que apuntar a 'telecomunicaciones' en general."
+        )
+        result["notes"].append("→ Para algo aún más preciso: sube tu lista de clientes actuales y crea un **Lookalike 1%** — Meta encontrará perfiles con comportamiento similar al de tus mejores clientes, no solo por interés declarado.")
 
-    # Telco / datos / planes
-    if any(kw in desc for kw in ["celular", "móvil", "movil", "teléfono", "telefono", "smartphone",
-                                  "plan", "ilimitado", "datos", "internet", "prepago", "postpago", "chip"]):
-        result["interest_keywords"].extend(["Smartphones", "Telefonía móvil", "Internet móvil", "Aplicaciones móviles"])
+    if any(kw in desc for kw in ["competencia", "competidor", "otras marcas", "paginas similares",
+                                  "páginas similares", "interactuan", "interactúan"]) and not mentioned_brands:
+        result["notes"].append("⚠️ No mencionaste marcas específicas de competencia. Si las nombras (ej. 'Claro', 'Entel', 'Bitel', 'Movistar') puedo buscar sus intereses exactos en vez de categorías genéricas.")
+        result["interest_keywords"].extend(["Telefonía móvil de prepago", "Comparación de planes móviles"])
 
-    # Jóvenes / Gen Z
-    if any(kw in desc for kw in ["jóvenes", "jovenes", "millennials", "gen z", "generación z",
-                                  "universitarios", "estudiantes", "chicos"]):
-        result["age_min"], result["age_max"] = 16, 28
-        result["interest_keywords"].extend(["TikTok", "Instagram", "Videojuegos", "Música", "Streaming"])
+    # Telco / datos / planes — desglose fino por sub-necesidad, no solo "telefonía móvil" genérico
+    if any(kw in desc for kw in ["ilimitado", "datos ilimitados"]):
+        result["interest_keywords"].extend(["Planes de datos ilimitados", "4G LTE", "Internet móvil de alta velocidad"])
+        result["narrow_logic"] = True
+    if any(kw in desc for kw in ["prepago", "chip", "recarga"]):
+        result["interest_keywords"].extend(["Telefonía prepago", "Recargas móviles"])
+    if any(kw in desc for kw in ["postpago", "contrato", "plan mensual"]):
+        result["interest_keywords"].extend(["Planes postpago", "Contratos de telefonía"])
+    if any(kw in desc for kw in ["celular", "móvil", "movil", "teléfono", "telefono", "smartphone"]) and not any(
+        kw in desc for kw in ["ilimitado", "prepago", "postpago"]
+    ):
+        result["interest_keywords"].extend(["Smartphones", "Compra de celulares nuevos"])
 
-    # Adultos / profesionales
-    if any(kw in desc for kw in ["adultos", "profesionales", "trabajadores", "ejecutivos",
-                                  "empresarios", "padres", "madres"]):
-        result["age_min"], result["age_max"] = 28, 55
-        result["interest_keywords"].extend(["Negocios", "Productividad", "Finanzas personales"])
+    # Edad — bandas más angostas y específicas en vez de rangos amplios genéricos
+    if any(kw in desc for kw in ["adolescentes", "teens", "13 a 17", "colegio", "secundaria"]):
+        result["age_min"], result["age_max"] = 13, 17
+        result["interest_keywords"].extend(["TikTok", "Videojuegos móviles"])
+    elif any(kw in desc for kw in ["universitarios", "estudiantes universitarios", "gen z"]):
+        result["age_min"], result["age_max"] = 18, 24
+        result["interest_keywords"].extend(["Vida universitaria", "TikTok", "Instagram Reels"])
+    elif any(kw in desc for kw in ["jóvenes", "jovenes", "millennials"]):
+        result["age_min"], result["age_max"] = 22, 32
+        result["interest_keywords"].extend(["Instagram", "Streaming de video", "Trabajo remoto"])
+    elif any(kw in desc for kw in ["padres", "madres", "familias", "hijos"]):
+        result["age_min"], result["age_max"] = 30, 50
+        result["interest_keywords"].extend(["Crianza de hijos", "Educación de hijos", "Familia"])
+    elif any(kw in desc for kw in ["profesionales", "ejecutivos", "empresarios", "trabajadores"]):
+        result["age_min"], result["age_max"] = 28, 50
+        result["interest_keywords"].extend(["Negocios pequeños", "Productividad en el trabajo", "Liderazgo"])
+    elif any(kw in desc for kw in ["adultos mayores", "tercera edad", "jubilados"]):
+        result["age_min"], result["age_max"] = 55, 65
+        result["interest_keywords"].extend(["Salud y bienestar", "Noticias"])
 
     # Género
     if any(kw in desc for kw in ["mujeres", "femenino", "mamás", "madre"]):
@@ -231,34 +262,47 @@ def ai_suggest_segmentation(description: str) -> dict:
     if any(kw in desc for kw in ["hombres", "masculino", "hombre"]):
         result["gender"] = "male"
 
-    # Gamers
+    # Gamers — más específico por plataforma
     if any(kw in desc for kw in ["gamers", "gaming", "videojuegos", "esports"]):
-        result["age_min"], result["age_max"] = 15, 35
-        result["interest_keywords"].extend(["Videojuegos", "eSports", "Mobile gaming"])
+        if any(kw in desc for kw in ["móvil", "movil", "celular"]):
+            result["interest_keywords"].extend(["Mobile gaming", "Free-to-play"])
+        else:
+            result["interest_keywords"].extend(["Videojuegos", "eSports"])
+        result["narrow_logic"] = True
 
-    # Redes sociales
-    if any(kw in desc for kw in ["redes sociales", "instagram", "tiktok", "youtube"]):
-        result["interest_keywords"].extend(["Instagram", "TikTok", "YouTube", "Creadores de contenido"])
+    # Redes sociales — por plataforma específica, no "redes sociales" en general
+    if "tiktok" in desc:
+        result["interest_keywords"].append("TikTok")
+    if "instagram" in desc:
+        result["interest_keywords"].append("Instagram")
+    if "youtube" in desc:
+        result["interest_keywords"].append("YouTube")
 
-    # Precio / ahorro
+    # Precio / ahorro — sensibilidad al precio como señal de comportamiento, no solo interés
     if any(kw in desc for kw in ["precio", "barato", "económico", "economico",
                                   "oferta", "descuento", "ahorro", "promo"]):
-        result["interest_keywords"].extend(["Cupones y descuentos", "Compras online"])
+        result["interest_keywords"].extend(["Cupones y descuentos", "Compras de ofertas online"])
+        result["narrow_logic"] = True
 
-    # Deportes
-    if any(kw in desc for kw in ["deportes", "fútbol", "futbol", "gym", "fitness", "running"]):
-        result["interest_keywords"].extend(["Deportes", "Fútbol", "Fitness y bienestar"])
+    # Deportes — por disciplina específica cuando se menciona
+    if "fútbol" in desc or "futbol" in desc:
+        result["interest_keywords"].append("Fútbol")
+    elif any(kw in desc for kw in ["gym", "fitness", "running"]):
+        result["interest_keywords"].extend(["Fitness y bienestar", "Entrenamiento físico"])
+    elif "deportes" in desc:
+        result["interest_keywords"].append("Deportes")
 
     # LATAM
     if any(kw in desc for kw in ["latinoamérica", "latinoamerica", "latam",
                                   "sudamérica", "toda la región"]):
         result["countries"] = ["PE", "MX", "CO", "AR", "CL", "EC"]
-        result["notes"].append("→ Se sugiere apuntar a múltiples países de LATAM.")
+        result["notes"].append("→ Se sugiere apuntar a múltiples países de LATAM (audiencia amplia — considera separar por país para mensajes más relevantes).")
 
     # Deduplicar y fallback
     result["interest_keywords"] = list(dict.fromkeys(result["interest_keywords"]))
-    if not result["interest_keywords"]:
-        result["interest_keywords"] = ["Telefonía móvil", "Smartphones", "Tecnología"]
+    if not result["interest_keywords"] and not result["brand_keywords"]:
+        result["interest_keywords"] = ["Telefonía móvil", "Smartphones"]
+        result["notes"].append("La descripción fue muy general — agregué intereses base de telco. Cuanto más específica sea tu descripción (edad, comportamiento, marca, plataforma), más fina será la segmentación.")
 
     return result
 
@@ -272,6 +316,38 @@ def search_meta_interests(query: str) -> list:
                  "audience": r.get("audience_size_lower_bound", 0)} for r in results]
     except Exception:
         return []
+
+def resolve_best_interest(query: str):
+    """Busca un término en Meta y devuelve el interés real más específico (mayor coincidencia, no el más masivo)."""
+    matches = search_meta_interests(query)
+    if not matches:
+        return None
+    exact = [m for m in matches if m["name"].strip().lower() == query.strip().lower()]
+    return exact[0] if exact else matches[0]
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_audience_estimate(account_id, countries, age_min, age_max, genders, interest_ids):
+    """Devuelve un estimado real de tamaño de audiencia para la segmentación armada, para medir qué tan fina quedó."""
+    try:
+        init_api()
+        targeting = {
+            "geo_locations": {"countries": countries},
+            "age_min": age_min,
+            "age_max": age_max,
+        }
+        if genders:
+            targeting["genders"] = genders
+        if interest_ids:
+            targeting["flexible_spec"] = [{"interests": [{"id": str(iid)} for iid in interest_ids]}]
+        est = AdAccount(account_id).get_delivery_estimate(
+            fields=["estimate_mau", "estimate_dau"],
+            params={"optimization_goal": "REACH", "targeting_spec": targeting},
+        )
+        if est:
+            return int(est[0].get("estimate_mau", 0))
+    except Exception:
+        return None
+    return None
 
 # ── Creación completa de anuncio ──────────────────────────────────────────────
 def create_full_ad(
@@ -576,8 +652,18 @@ with tab_create:
         )
         if st.button("✨ Generar sugerencia de segmentación", type="secondary"):
             if ai_description.strip():
-                with st.spinner("Analizando tu audiencia..."):
+                with st.spinner("Analizando tu audiencia y buscando intereses reales en Meta..."):
                     sugg = ai_suggest_segmentation(ai_description)
+                    # Resolver cada término sugerido contra intereses REALES de Meta (no genéricos)
+                    resolved = []
+                    all_terms = sugg["brand_keywords"] + sugg["interest_keywords"]
+                    for term in all_terms[:8]:  # límite razonable de llamadas a la API
+                        match = resolve_best_interest(term)
+                        if match:
+                            resolved.append(match)
+                            st.session_state["selected_interests_map"][match["id"]] = match["name"]
+                    sugg["resolved_count"] = len(resolved)
+                    sugg["unresolved"] = [t for t in all_terms[:8] if t not in [r["name"] for r in resolved]]
                 st.session_state["ai_sugg"] = sugg
             else:
                 st.warning("Escribe una descripción primero.")
@@ -587,10 +673,14 @@ with tab_create:
             gender_label = {"all": "Todos", "male": "Hombres", "female": "Mujeres"}.get(sugg["gender"], "Todos")
             sc1, sc2, sc3 = st.columns(3)
             sc1.markdown(f"🌍 **Países:** {', '.join(sugg['countries'])}")
-            sc2.markdown(f"👤 **Edad:** {sugg['age_min']}–{sugg['age_max']}")
+            sc2.markdown(f"👤 **Edad:** {sugg['age_min']}–{sugg['age_max']} (banda angosta, no genérica)")
             sc3.markdown(f"⚧️ **Género:** {gender_label}")
-            if sugg["interest_keywords"]:
-                st.markdown(f"🎯 **Intereses sugeridos:** {', '.join(sugg['interest_keywords'])}")
+            if sugg.get("resolved_count"):
+                st.success(f"✅ Se agregaron {sugg['resolved_count']} intereses **reales** de Meta directamente a tu selección (ver abajo, en '{'Intereses seleccionados'}').")
+            if sugg.get("unresolved"):
+                st.caption(f"No se encontraron en Meta como interés catalogado: {', '.join(sugg['unresolved'])} — puedes buscarlos manualmente abajo.")
+            if sugg.get("narrow_logic"):
+                st.caption("💡 Esta audiencia combina varias señales específicas — es intencionalmente más angosta que una segmentación genérica. Revisa el estimado de audiencia más abajo.")
             for note in sugg.get("notes", []):
                 st.markdown(note)
 
@@ -667,6 +757,20 @@ with tab_create:
                 st.rerun()
 
     selected_interest_ids = list(st.session_state["selected_interests_map"].keys())
+
+    # Estimado real de audiencia — mide qué tan fina quedó la segmentación
+    if selected_countries:
+        with st.spinner("Calculando tamaño de audiencia..."):
+            audience_est = get_audience_estimate(
+                account_id, selected_countries, age_min, age_max, genders, selected_interest_ids
+            )
+        if audience_est is not None:
+            if audience_est < 50_000:
+                st.info(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — muy específica. Bien si buscas precisión, pero vigila que no sea tan chica que limite la entrega.")
+            elif audience_est < 500_000:
+                st.success(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — segmentación fina, buen equilibrio entre precisión y alcance.")
+            else:
+                st.warning(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — todavía amplia. Agrega más intereses o acorta el rango de edad para afinar más.")
 
     st.divider()
 
