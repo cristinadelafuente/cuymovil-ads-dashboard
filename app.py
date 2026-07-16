@@ -635,18 +635,38 @@ with tab_create:
         else:
             st.warning("Escribe un término primero.")
 
-    selected_interest_ids = []
+    # Acumulador persistente de intereses elegidos (sobrevive a nuevas búsquedas)
+    if "selected_interests_map" not in st.session_state:
+        st.session_state["selected_interests_map"] = {}  # id -> name
+
     if "interest_results" in st.session_state:
         results = st.session_state["interest_results"]
         if results:
-            options_map = {
-                f"{r['name']}  (~{r['audience']:,.0f} personas)": r["id"] for r in results
-            }
-            chosen = st.multiselect("Selecciona intereses:", list(options_map.keys()),
-                                    key="chosen_interests")
-            selected_interest_ids = [options_map[c] for c in chosen]
+            for r in results:
+                already = r["id"] in st.session_state["selected_interests_map"]
+                checked = st.checkbox(
+                    f"{r['name']}  (~{r['audience']:,.0f} personas)",
+                    value=already,
+                    key=f"chk_interest_{r['id']}",
+                )
+                if checked:
+                    st.session_state["selected_interests_map"][r["id"]] = r["name"]
+                elif already:
+                    del st.session_state["selected_interests_map"][r["id"]]
         else:
             st.info("Sin resultados — prueba otro término.")
+
+    # Mostrar todos los intereses elegidos hasta ahora (de todas las búsquedas)
+    if st.session_state["selected_interests_map"]:
+        st.markdown("**Intereses seleccionados:**")
+        for iid, iname in list(st.session_state["selected_interests_map"].items()):
+            rm_col1, rm_col2 = st.columns([5, 1])
+            rm_col1.write(f"🎯 {iname}")
+            if rm_col2.button("✕ Quitar", key=f"rm_interest_{iid}"):
+                del st.session_state["selected_interests_map"][iid]
+                st.rerun()
+
+    selected_interest_ids = list(st.session_state["selected_interests_map"].keys())
 
     st.divider()
 
