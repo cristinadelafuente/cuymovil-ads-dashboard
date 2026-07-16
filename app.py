@@ -392,6 +392,7 @@ def create_full_ad(
             AdSet.Field.daily_budget:      int(daily_budget_usd * 100),
             AdSet.Field.billing_event:     "IMPRESSIONS",
             AdSet.Field.optimization_goal: "LINK_CLICKS",
+            AdSet.Field.bid_strategy:      "LOWEST_COST_WITHOUT_CAP",
             AdSet.Field.targeting:         targeting,
             AdSet.Field.status:            "PAUSED",
             AdSet.Field.start_time:        start_ts,
