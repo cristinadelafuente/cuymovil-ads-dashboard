@@ -362,10 +362,11 @@ def create_full_ad(
     camp = AdAccount(account_id).create_campaign(
         fields=[Campaign.Field.id],
         params={
-            Campaign.Field.name:                 camp_name,
-            Campaign.Field.objective:             objective,
-            Campaign.Field.status:                "PAUSED",
-            Campaign.Field.special_ad_categories: [],
+            Campaign.Field.name:                          camp_name,
+            Campaign.Field.objective:                      objective,
+            Campaign.Field.status:                         "PAUSED",
+            Campaign.Field.special_ad_categories:          [],
+            "is_adset_budget_sharing_enabled":              False,
         }
     )
     camp_id = camp[Campaign.Field.id]
