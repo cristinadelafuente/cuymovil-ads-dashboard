@@ -376,6 +376,7 @@ def create_full_ad(
         "geo_locations": {"countries": countries},
         "age_min": age_min,
         "age_max": age_max,
+        "targeting_automation": {"advantage_audience": 0},
     }
     if genders:
         targeting["genders"] = genders
