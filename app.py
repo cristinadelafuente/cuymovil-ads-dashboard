@@ -14,11 +14,14 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone, date
+from zoneinfo import ZoneInfo
+
+PERU_TZ = ZoneInfo("America/Lima")
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
     page_title="Cuy Móvil · Meta Ads",
-    page_icon="🦔",
+    page_icon="🐹",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -48,6 +51,7 @@ DATE_OPTIONS = {
     "Últimos 90 días": "last_90d",
     "Este mes":        "this_month",
     "Mes anterior":    "last_month",
+    "Personalizado":   "custom",
 }
 
 INSIGHT_FIELDS = ["spend", "impressions", "clicks", "ctr", "cpc", "reach", "frequency"]
@@ -91,7 +95,7 @@ def init_api():
         FacebookAdsApi.init(access_token=ACCESS_TOKEN)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_campaigns(account_id: str, date_preset: str) -> pd.DataFrame:
+def fetch_campaigns(account_id: str, date_preset: str, since: str = "", until: str = "") -> pd.DataFrame:
     init_api()
     account   = AdAccount(account_id)
     campaigns = account.get_campaigns(fields=[
@@ -102,10 +106,15 @@ def fetch_campaigns(account_id: str, date_preset: str) -> pd.DataFrame:
         Campaign.Field.daily_budget,
         Campaign.Field.bid_strategy,
     ])
+    if date_preset == "custom" and since and until:
+        insight_time_params = {"time_range": {"since": since, "until": until}}
+    else:
+        insight_time_params = {"date_preset": date_preset}
+
     rows = []
     for c in campaigns:
         status   = c.get(Campaign.Field.effective_status, "")
-        insights = c.get_insights(fields=INSIGHT_FIELDS, params={"date_preset": date_preset})
+        insights = c.get_insights(fields=INSIGHT_FIELDS, params=insight_time_params)
         if not insights:
             continue
         ins       = insights[0]
@@ -456,9 +465,9 @@ def create_full_ad(
 # ══════════════════════════════════════════════════════════════════════════════
 col_title, col_time = st.columns([4, 1])
 with col_title:
-    st.title("🦔 Cuy Móvil · Meta Ads Dashboard")
+    st.title("🐹 Cuy Móvil · Meta Ads Dashboard")
 with col_time:
-    st.caption(f"📅 {datetime.now().strftime('%d %b %Y, %H:%M')}")
+    st.caption(f"📅 {datetime.now(PERU_TZ).strftime('%d %b %Y, %H:%M')} (hora Perú)")
 
 with st.sidebar:
     st.header("Filtros")
@@ -466,6 +475,21 @@ with st.sidebar:
     account_id    = ACCOUNTS[account_label]
     date_label    = st.selectbox("Período", list(DATE_OPTIONS.keys()), index=2)
     date_preset   = DATE_OPTIONS[date_label]
+
+    since_str, until_str = "", ""
+    if date_preset == "custom":
+        hoy_peru = datetime.now(PERU_TZ).date()
+        custom_range = st.date_input(
+            "Rango de fechas",
+            value=(hoy_peru.replace(day=1), hoy_peru),
+            max_value=hoy_peru,
+        )
+        if isinstance(custom_range, tuple) and len(custom_range) == 2:
+            since_str = custom_range[0].strftime("%Y-%m-%d")
+            until_str = custom_range[1].strftime("%Y-%m-%d")
+        else:
+            st.warning("Selecciona una fecha de inicio y una de fin.")
+
     show_paused   = st.toggle("Incluir campañas pausadas", value=False)
     if st.button("🔄 Actualizar datos", use_container_width=True):
         st.cache_data.clear()
@@ -477,6 +501,10 @@ if not ACCESS_TOKEN:
     st.error("Falta ACCESS_TOKEN. Agrégalo en Streamlit Cloud → Settings → Secrets.")
     st.stop()
 
+if date_preset == "custom" and not (since_str and until_str):
+    st.info("Selecciona un rango de fechas válido en el panel izquierdo para continuar.")
+    st.stop()
+
 # ── Tabs principales ──────────────────────────────────────────────────────────
 tab_dash, tab_create = st.tabs(["📊 Dashboard", "➕ Crear Anuncio"])
 
@@ -485,7 +513,7 @@ tab_dash, tab_create = st.tabs(["📊 Dashboard", "➕ Crear Anuncio"])
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_dash:
     with st.spinner("Cargando datos de Meta Ads..."):
-        df = fetch_campaigns(account_id, date_preset)
+        df = fetch_campaigns(account_id, date_preset, since_str, until_str)
 
     if df.empty:
         st.info("No hay datos disponibles para este período y cuenta.")
@@ -540,7 +568,7 @@ with tab_dash:
 
         # Tabla
         st.subheader("Detalle por campaña")
-        table_df = view_df[["Campaña", "Estado", "Días activa", "Gasto", "Impresiones",
+        table_df = view_df[["Campaña", "Estado", "Gasto", "Impresiones",
                              "Clics", "CTR", "CPC", "Alcance", "Frecuencia"]].copy()
         st.dataframe(
             table_df.style
@@ -791,7 +819,7 @@ with tab_create:
     with cr1:
         primary_text = st.text_area(
             "Texto principal *",
-            placeholder="Ej: ¡Conéctate sin límites con Cuy Móvil! 🦔 Planes desde S/39.",
+            placeholder="Ej: ¡Conéctate sin límites con Cuy Móvil! 🐹 Planes desde S/39.",
             height=100,
         )
         headline = st.text_input("Titular *", placeholder="Ej: Plan Ilimitado desde S/39")
