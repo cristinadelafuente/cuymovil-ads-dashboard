@@ -358,72 +358,89 @@ def get_audience_estimate(account_id, countries, age_min, age_max, genders, inte
         return None
     return None
 
-# ── Creación completa de anuncio ──────────────────────────────────────────────
-def create_full_ad(
-    account_id, page_id, camp_name, objective, daily_budget_usd,
-    adset_name, countries, age_min, age_max, genders, interest_ids,
-    image_bytes, image_ext, primary_text, headline, ad_description,
-    destination_url, cta_type, start_date,
-):
-    init_api()
+# ── Audiencias Lookalike ───────────────────────────────────────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_lookalike_audiences(account_id: str) -> list:
+    try:
+        init_api()
+        from facebook_business.adobjects.customaudience import CustomAudience
+        audiences = AdAccount(account_id).get_custom_audiences(
+            fields=[CustomAudience.Field.id, CustomAudience.Field.name,
+                    CustomAudience.Field.subtype, CustomAudience.Field.approximate_count_upper_bound]
+        )
+        return [
+            {"id": a["id"], "name": a["name"], "size": a.get("approximate_count_upper_bound", 0)}
+            for a in audiences if a.get("subtype") == "LOOKALIKE"
+        ]
+    except Exception:
+        return []
 
-    # 1. Campaña
-    camp = AdAccount(account_id).create_campaign(
-        fields=[Campaign.Field.id],
-        params={
-            Campaign.Field.name:                          camp_name,
-            Campaign.Field.objective:                      objective,
-            Campaign.Field.status:                         "PAUSED",
-            Campaign.Field.special_ad_categories:          [],
-            "is_adset_budget_sharing_enabled":              False,
-        }
-    )
-    camp_id = camp[Campaign.Field.id]
-
-    # 2. Conjunto de anuncios
-    targeting = {
-        "geo_locations": {"countries": countries},
-        "age_min": age_min,
-        "age_max": age_max,
-        "targeting_automation": {"advantage_audience": 0},
-    }
-    if genders:
-        targeting["genders"] = genders
-    if interest_ids:
-        targeting["flexible_spec"] = [{"interests": [{"id": str(iid)} for iid in interest_ids]}]
-
-    start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
-
-    adset = AdAccount(account_id).create_ad_set(
-        fields=[AdSet.Field.id],
-        params={
-            AdSet.Field.name:              adset_name,
-            AdSet.Field.campaign_id:       camp_id,
-            AdSet.Field.daily_budget:      int(daily_budget_usd * 100),
-            AdSet.Field.billing_event:     "IMPRESSIONS",
-            AdSet.Field.optimization_goal: "LINK_CLICKS",
-            AdSet.Field.bid_strategy:      "LOWEST_COST_WITHOUT_CAP",
-            AdSet.Field.targeting:         targeting,
-            AdSet.Field.status:            "PAUSED",
-            AdSet.Field.start_time:        start_ts,
-        }
-    )
-    adset_id = adset[AdSet.Field.id]
-
-    # 3. Subir imagen
+# ── Subir imagen (reutilizable para preview y creación final) ─────────────────
+def upload_ad_image(account_id: str, image_bytes: bytes, image_ext: str) -> str:
     ext = ("." + image_ext.lower().replace("jpeg", "jpg")) if image_ext else ".jpg"
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(image_bytes)
         tmp_path = tmp.name
     try:
+        init_api()
         img_obj = AdImage(parent_id=account_id)
         img_obj[AdImage.Field.filename] = tmp_path
         img_obj.remote_create()
-        image_hash = img_obj[AdImage.Field.hash]
+        return img_obj[AdImage.Field.hash]
     finally:
         os.unlink(tmp_path)
 
-    # 4. Creatividad
+# ── Vista previa del anuncio (sin publicar nada) ──────────────────────────────
+def get_ad_preview_html(account_id, page_id, image_hash, primary_text, headline,
+                         ad_description, destination_url, cta_type, ad_format):
+    init_api()
+    creative_spec = {
+        "object_story_spec": {
+            "page_id": page_id,
+            "link_data": {
+                "image_hash":     image_hash,
+                "link":           destination_url,
+                "message":        primary_text,
+                "name":           headline,
+                "description":    ad_description,
+                "call_to_action": {"type": cta_type, "value": {"link": destination_url}},
+            }
+        }
+    }
+    result = AdAccount(account_id).get_generate_previews(params={
+        "creative": creative_spec,
+        "ad_format": ad_format,
+    })
+    if result:
+        return result[0].get("body", "")
+    return None
+
+# ── Creación completa de anuncio (soporta 1 o varios conjuntos por plataforma) ─
+def create_full_ad(
+    account_id, page_id, camp_name, objective,
+    adset_configs,  # lista: [{"platforms": ["facebook","instagram"], "budget": 10.0, "suffix": ""}]
+    countries, age_min, age_max, genders, interest_ids, custom_audience_ids,
+    image_bytes, image_ext, primary_text, headline, ad_description,
+    destination_url, cta_type, start_date,
+):
+    init_api()
+
+    # 1. Campaña (una sola, compartida por todos los conjuntos)
+    camp = AdAccount(account_id).create_campaign(
+        fields=[Campaign.Field.id],
+        params={
+            Campaign.Field.name:                 camp_name,
+            Campaign.Field.objective:             objective,
+            Campaign.Field.status:                "PAUSED",
+            Campaign.Field.special_ad_categories: [],
+            "is_adset_budget_sharing_enabled":     False,
+        }
+    )
+    camp_id = camp[Campaign.Field.id]
+
+    # 2. Imagen y creatividad (una sola, compartida por todos los conjuntos)
+    image_hash = upload_ad_image(account_id, image_bytes, image_ext)
+
     creative = AdAccount(account_id).create_ad_creative(
         fields=[AdCreative.Field.id],
         params={
@@ -443,21 +460,64 @@ def create_full_ad(
     )
     creative_id = creative[AdCreative.Field.id]
 
-    # 5. Anuncio
-    ad = AdAccount(account_id).create_ad(
-        fields=[Ad.Field.id],
-        params={
-            Ad.Field.name:     camp_name,
-            Ad.Field.adset_id: adset_id,
-            Ad.Field.creative: {"creative_id": creative_id},
-            Ad.Field.status:   "PAUSED",
+    start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
+
+    # 3. Un conjunto de anuncios + un anuncio por cada plataforma/presupuesto configurado
+    results = []
+    for cfg in adset_configs:
+        targeting = {
+            "geo_locations": {"countries": countries},
+            "age_min": age_min,
+            "age_max": age_max,
+            "targeting_automation": {"advantage_audience": 0},
+            "publisher_platforms": cfg["platforms"],
         }
-    )
+        if genders:
+            targeting["genders"] = genders
+        if interest_ids:
+            targeting["flexible_spec"] = [{"interests": [{"id": str(iid)} for iid in interest_ids]}]
+        if custom_audience_ids:
+            targeting["custom_audiences"] = [{"id": str(cid)} for cid in custom_audience_ids]
+
+        suffix = cfg.get("suffix", "")
+        adset_name_final = f"{camp_name}_Conjunto{('_' + suffix) if suffix else ''}"
+
+        adset = AdAccount(account_id).create_ad_set(
+            fields=[AdSet.Field.id],
+            params={
+                AdSet.Field.name:              adset_name_final,
+                AdSet.Field.campaign_id:       camp_id,
+                AdSet.Field.daily_budget:      int(cfg["budget"] * 100),
+                AdSet.Field.billing_event:     "IMPRESSIONS",
+                AdSet.Field.optimization_goal: "LINK_CLICKS",
+                AdSet.Field.bid_strategy:      "LOWEST_COST_WITHOUT_CAP",
+                AdSet.Field.targeting:         targeting,
+                AdSet.Field.status:            "PAUSED",
+                AdSet.Field.start_time:        start_ts,
+            }
+        )
+        adset_id = adset[AdSet.Field.id]
+
+        ad = AdAccount(account_id).create_ad(
+            fields=[Ad.Field.id],
+            params={
+                Ad.Field.name:     f"{camp_name}{('_' + suffix) if suffix else ''}",
+                Ad.Field.adset_id: adset_id,
+                Ad.Field.creative: {"creative_id": creative_id},
+                Ad.Field.status:   "PAUSED",
+            }
+        )
+        results.append({
+            "platforms": cfg["platforms"],
+            "budget":    cfg["budget"],
+            "adset_id":  adset_id,
+            "ad_id":     ad[Ad.Field.id],
+        })
+
     return {
         "campaign_id": camp_id,
-        "adset_id":    adset_id,
         "creative_id": creative_id,
-        "ad_id":       ad[Ad.Field.id],
+        "adsets":      results,
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -659,14 +719,34 @@ with tab_create:
 
     # ── PASO 1: Campaña ───────────────────────────────────────────────────────
     st.subheader("1️⃣  Campaña")
-    p1a, p1b, p1c = st.columns(3)
+    p1a, p1b = st.columns(2)
     with p1a:
         camp_name = st.text_input("Nombre de la campaña *", placeholder="ej. JUL26_Ventas_Ilimitados")
     with p1b:
         obj_label = st.selectbox("Objetivo *", list(OBJECTIVES.keys()))
         objective = OBJECTIVES[obj_label]
-    with p1c:
-        daily_budget = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=10.0, step=1.0)
+
+    st.markdown("**¿Dónde quieres publicar?**")
+    PLATFORM_MAP = {"Facebook": "facebook", "Instagram": "instagram"}
+    platforms_selected = st.multiselect(
+        "Plataformas *", list(PLATFORM_MAP.keys()), default=["Facebook", "Instagram"]
+    )
+
+    differentiate_budget = False
+    budget_by_platform = {}
+    if len(platforms_selected) == 2:
+        differentiate_budget = st.checkbox(
+            "Usar presupuestos diferenciados por plataforma",
+            help="Si lo activas, se crea un conjunto de anuncios independiente por cada plataforma, cada uno con su propio presupuesto diario.",
+        )
+
+    if differentiate_budget:
+        pb1, pb2 = st.columns(2)
+        budget_by_platform["facebook"]  = pb1.number_input("Presupuesto diario Facebook (USD) *", min_value=1.0, value=10.0, step=1.0)
+        budget_by_platform["instagram"] = pb2.number_input("Presupuesto diario Instagram (USD) *", min_value=1.0, value=10.0, step=1.0)
+        daily_budget_total = sum(budget_by_platform.values())
+    else:
+        daily_budget_total = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=10.0, step=1.0)
 
     st.divider()
 
@@ -789,6 +869,17 @@ with tab_create:
 
     selected_interest_ids = list(st.session_state["selected_interests_map"].keys())
 
+    # Públicos Lookalike
+    st.markdown("**Públicos Lookalike** (basados en tus clientes o públicos existentes)")
+    lookalikes = fetch_lookalike_audiences(account_id)
+    selected_lookalike_ids = []
+    if lookalikes:
+        lookalike_options = {f"{a['name']}  (~{a['size']:,.0f} personas)": a["id"] for a in lookalikes}
+        chosen_lookalikes = st.multiselect("Selecciona públicos Lookalike:", list(lookalike_options.keys()))
+        selected_lookalike_ids = [lookalike_options[c] for c in chosen_lookalikes]
+    else:
+        st.caption("No se encontraron públicos Lookalike en esta cuenta. Puedes crear uno en Ads Manager → Públicos → Crear público → Lookalike, a partir de tu lista de clientes o de tu página.")
+
     # Estimado real de audiencia — mide qué tan fina quedó la segmentación
     if selected_countries:
         with st.spinner("Calculando tamaño de audiencia..."):
@@ -813,7 +904,7 @@ with tab_create:
         type=["jpg", "jpeg", "png"],
     )
     if uploaded_image:
-        st.image(uploaded_image, caption="Vista previa", width=280)
+        st.image(uploaded_image, caption="Imagen cargada", width=280)
 
     cr1, cr2 = st.columns(2)
     with cr1:
@@ -829,17 +920,50 @@ with tab_create:
         cta_label = st.selectbox("Botón de acción (CTA)", list(CTA_OPTIONS.keys()))
         cta_type  = CTA_OPTIONS[cta_label]
 
+    # Vista previa del anuncio (usa la API de Meta, no publica nada)
+    st.markdown("**👁️ Vista previa del anuncio**")
+    preview_platform_label = st.radio(
+        "Ver como se vería en:",
+        ["Facebook (feed móvil)", "Instagram (feed)"],
+        horizontal=True,
+    )
+    preview_ad_format = "MOBILE_FEED_STANDARD" if "Facebook" in preview_platform_label else "INSTAGRAM_STANDARD"
+
+    if st.button("🔍 Generar vista previa"):
+        if not uploaded_image or not page_id_input or not destination_url:
+            st.warning("Sube una imagen, indica el ID de página y la URL de destino antes de generar la vista previa.")
+        else:
+            with st.spinner("Generando vista previa con Meta..."):
+                try:
+                    preview_image_bytes = uploaded_image.getvalue()
+                    preview_image_ext = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+                    preview_hash = upload_ad_image(account_id, preview_image_bytes, preview_image_ext)
+                    st.session_state["preview_image_hash"] = preview_hash
+                    preview_html = get_ad_preview_html(
+                        account_id, page_id_input, preview_hash,
+                        primary_text or " ", headline or " ", ad_description or "",
+                        destination_url, cta_type, preview_ad_format,
+                    )
+                    st.session_state["preview_html"] = preview_html
+                except Exception as e:
+                    st.error(f"No se pudo generar la vista previa: {e}")
+
+    if st.session_state.get("preview_html"):
+        st.components.v1.html(st.session_state["preview_html"], height=600, scrolling=True)
+
     st.divider()
 
     # ── PASO 4: Detalles finales ──────────────────────────────────────────────
     st.subheader("4️⃣  Detalles finales")
     d1, d2 = st.columns(2)
     with d1:
-        adset_name = st.text_input("Nombre del conjunto de anuncios",
-                                   value=(camp_name + "_Conjunto") if camp_name else "")
         start_date = st.date_input("Fecha de inicio", value=date.today())
     with d2:
-        st.info(f"**Cuenta:** {account_label}\n\n**Presupuesto:** ${daily_budget:.2f}/día")
+        if differentiate_budget:
+            resumen_presupuesto = " · ".join(f"{k.capitalize()}: ${v:.2f}/día" for k, v in budget_by_platform.items())
+        else:
+            resumen_presupuesto = f"${daily_budget_total:.2f}/día ({', '.join(platforms_selected) or 'sin plataforma'})"
+        st.info(f"**Cuenta:** {account_label}\n\n**Presupuesto:** {resumen_presupuesto}")
 
     st.divider()
 
@@ -852,29 +976,41 @@ with tab_create:
     if not headline:           missing.append("Titular")
     if not uploaded_image:     missing.append("Imagen del anuncio")
     if not selected_countries: missing.append("Al menos un país")
+    if not platforms_selected: missing.append("Al menos una plataforma (Facebook o Instagram)")
 
     if missing:
         st.warning("Faltan campos requeridos: " + "  ·  ".join(missing))
         st.button("🚀 Crear anuncio (pausado)", type="primary", disabled=True)
     else:
         if st.button("🚀 Crear anuncio (pausado)", type="primary"):
-            with st.spinner("Creando campaña → conjunto → imagen → creatividad → anuncio…"):
+            with st.spinner("Creando campaña → conjunto(s) → imagen → creatividad → anuncio(s)…"):
                 try:
                     image_bytes = uploaded_image.read()
                     image_ext   = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+
+                    # Armar la configuración de conjuntos de anuncios por plataforma
+                    if differentiate_budget:
+                        adset_configs = []
+                        if "Facebook" in platforms_selected:
+                            adset_configs.append({"platforms": ["facebook"], "budget": budget_by_platform["facebook"], "suffix": "FB"})
+                        if "Instagram" in platforms_selected:
+                            adset_configs.append({"platforms": ["instagram"], "budget": budget_by_platform["instagram"], "suffix": "IG"})
+                    else:
+                        chosen_platform_codes = [PLATFORM_MAP[p] for p in platforms_selected]
+                        adset_configs = [{"platforms": chosen_platform_codes, "budget": daily_budget_total, "suffix": ""}]
 
                     result = create_full_ad(
                         account_id=account_id,
                         page_id=page_id_input,
                         camp_name=camp_name,
                         objective=objective,
-                        daily_budget_usd=daily_budget,
-                        adset_name=adset_name or camp_name + "_Conjunto",
+                        adset_configs=adset_configs,
                         countries=selected_countries,
                         age_min=age_min,
                         age_max=age_max,
                         genders=genders,
                         interest_ids=selected_interest_ids,
+                        custom_audience_ids=selected_lookalike_ids,
                         image_bytes=image_bytes,
                         image_ext=image_ext,
                         primary_text=primary_text,
@@ -888,17 +1024,21 @@ with tab_create:
                     st.success("✅ ¡Anuncio creado exitosamente en estado PAUSADO!")
                     r1, r2 = st.columns(2)
                     with r1:
+                        adsets_md = "\n".join(
+                            f"- 👥 Conjunto ({', '.join(a['platforms'])}, ${a['budget']:.2f}/día): `{a['adset_id']}` → Anuncio: `{a['ad_id']}`"
+                            for a in result["adsets"]
+                        )
                         st.markdown(f"""
 **IDs generados:**
 - 📢 Campaña: `{result['campaign_id']}`
-- 👥 Conjunto: `{result['adset_id']}`
 - 🎨 Creatividad: `{result['creative_id']}`
-- 📌 Anuncio: `{result['ad_id']}`
+{adsets_md}
                         """)
                     with r2:
                         mgr_url = f"https://www.facebook.com/adsmanager/manage/campaigns?act={account_id.replace('act_', '')}"
                         st.markdown(f"### [📋 Ver en Ads Manager]({mgr_url})")
                         st.info("Cuando estés lista, actívalo desde Ads Manager.")
+                    st.session_state["preview_html"] = None
                     st.cache_data.clear()
 
                 except Exception as e:
