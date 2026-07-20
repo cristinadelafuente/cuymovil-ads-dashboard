@@ -707,8 +707,23 @@ def init_ga_client():
     credentials = service_account.Credentials.from_service_account_info(creds_dict)
     return BetaAnalyticsDataClient(credentials=credentials)
 
+# Dominios que reportan a la misma propiedad GA4 — se pueden filtrar por separado
+HOST_OPTIONS = {"Todos los dominios": None, "🐹 cuy.pe": "cuy.pe", "🔒 secure.guinea.pe": "secure.guinea.pe"}
+
+def _ga_host_filter(host_filter: str):
+    """Construye un FilterExpression de GA4 para filtrar por hostName exacto, o None si no aplica."""
+    if not host_filter:
+        return None
+    from google.analytics.data_v1beta.types import FilterExpression, Filter
+    return FilterExpression(
+        filter=Filter(
+            field_name="hostName",
+            string_filter=Filter.StringFilter(value=host_filter, match_type=Filter.StringFilter.MatchType.EXACT),
+        )
+    )
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_ga_summary(property_id: str, start_date: str, end_date: str) -> dict:
+def fetch_ga_summary(property_id: str, start_date: str, end_date: str, host_filter: str = None) -> dict:
     from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Metric
     client = init_ga_client()
     request = RunReportRequest(
@@ -718,6 +733,7 @@ def fetch_ga_summary(property_id: str, start_date: str, end_date: str) -> dict:
             Metric(name="conversions"), Metric(name="bounceRate"), Metric(name="averageSessionDuration"),
         ],
         date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+        dimension_filter=_ga_host_filter(host_filter),
     )
     response = client.run_report(request)
     if not response.rows:
@@ -750,7 +766,7 @@ def fetch_ga_timeseries(property_id: str, start_date: str, end_date: str) -> pd.
     return pd.DataFrame(rows)
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_ga_channels(property_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+def fetch_ga_channels(property_id: str, start_date: str, end_date: str, host_filter: str = None) -> pd.DataFrame:
     from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
     client = init_ga_client()
     request = RunReportRequest(
@@ -759,6 +775,7 @@ def fetch_ga_channels(property_id: str, start_date: str, end_date: str) -> pd.Da
         metrics=[Metric(name="sessions"), Metric(name="conversions")],
         date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
         order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
+        dimension_filter=_ga_host_filter(host_filter),
     )
     response = client.run_report(request)
     rows = [{
@@ -769,7 +786,7 @@ def fetch_ga_channels(property_id: str, start_date: str, end_date: str) -> pd.Da
     return pd.DataFrame(rows)
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: int = 10) -> pd.DataFrame:
+def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: int = 10, host_filter: str = None) -> pd.DataFrame:
     from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
     client = init_ga_client()
     request = RunReportRequest(
@@ -779,6 +796,7 @@ def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: 
         date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
         order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="screenPageViews"), desc=True)],
         limit=limit,
+        dimension_filter=_ga_host_filter(host_filter),
     )
     response = client.run_report(request)
     rows = [{
@@ -787,6 +805,16 @@ def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: 
         "Usuarios": float(r.metric_values[1].value),
     } for r in response.rows]
     return pd.DataFrame(rows)
+
+def fetch_ga_by_domain(property_id: str, start_date: str, end_date: str, top_limit: int = 5) -> dict:
+    """Trae el desglose de métricas de Web Analytics separado por dominio (cuy.pe / secure.guinea.pe)."""
+    result = {}
+    for host in ["cuy.pe", "secure.guinea.pe"]:
+        result[host] = {
+            "summary":   fetch_ga_summary(property_id, start_date, end_date, host_filter=host),
+            "top_pages": fetch_ga_top_pages(property_id, start_date, end_date, limit=top_limit, host_filter=host),
+        }
+    return result
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
@@ -1037,6 +1065,8 @@ with st.sidebar:
 
     else:
         st.subheader("Filtros — Web Analytics")
+        ga_host_label  = st.selectbox("Dominio", list(HOST_OPTIONS.keys()), key="ga_host_label")
+        ga_host_filter = HOST_OPTIONS[ga_host_label]
         ga_date_label  = st.selectbox("Período", list(DATE_OPTIONS.keys()), index=2, key="ga_date_label")
         ga_date_preset = DATE_OPTIONS[ga_date_label]
 
@@ -1145,6 +1175,40 @@ if nav_section == "📋 Resumen":
             )
         else:
             st.info("Sin datos de páginas para este período.")
+
+    st.divider()
+
+    # Desglose por dominio — cuy.pe vs secure.guinea.pe
+    st.subheader("📱 Desglose por dominio")
+    if "gcp_service_account" in st.secrets:
+        try:
+            with st.spinner("Separando métricas por dominio..."):
+                ga_by_domain_r = fetch_ga_by_domain(GA_PROPERTY_ID, r_start, r_end, top_limit=5)
+        except Exception as e:
+            ga_by_domain_r = None
+            st.warning(f"No se pudo separar por dominio: {e}")
+
+        if ga_by_domain_r:
+            dr1, dr2 = st.columns(2)
+            for col, host, label in zip([dr1, dr2], ["cuy.pe", "secure.guinea.pe"], ["🐹 cuy.pe", "🔒 secure.guinea.pe"]):
+                with col:
+                    st.markdown(f"**{label}**")
+                    s = ga_by_domain_r[host]["summary"]
+                    tp = ga_by_domain_r[host]["top_pages"]
+                    if s and s["sessions"]:
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("👥 Sesiones", f"{s['sessions']:,.0f}")
+                        m2.metric("⏱️ Tiempo", f"{s['avg_duration']:.0f}s")
+                        m3.metric("↩️ Rebote", f"{s['bounce_rate']:.1f}%")
+                        if tp is not None and not tp.empty:
+                            st.dataframe(
+                                tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
+                                use_container_width=True, hide_index=True, height=180,
+                            )
+                    else:
+                        st.info(f"Sin datos para **{host}** en este período.")
+    else:
+        st.info("Google Analytics no está conectado.")
 
     st.divider()
 
@@ -1693,14 +1757,14 @@ else:  # 📈 Web Analytics
         st.stop()
 
     ga_start, ga_end = get_ga_date_range(ga_date_preset, ga_since_str, ga_until_str)
-    st.caption(f"Período: **{ga_start}** a **{ga_end}** · Propiedad GA4: `{GA_PROPERTY_ID}`")
+    st.caption(f"Período: **{ga_start}** a **{ga_end}** · Dominio: **{ga_host_label}** · Propiedad GA4: `{GA_PROPERTY_ID}`")
 
     try:
         with st.spinner("Cargando datos de Google Analytics..."):
-            ga_summary = fetch_ga_summary(GA_PROPERTY_ID, ga_start, ga_end)
+            ga_summary = fetch_ga_summary(GA_PROPERTY_ID, ga_start, ga_end, host_filter=ga_host_filter)
             ga_timeseries = fetch_ga_timeseries(GA_PROPERTY_ID, ga_start, ga_end)
-            ga_channels = fetch_ga_channels(GA_PROPERTY_ID, ga_start, ga_end)
-            ga_top_pages = fetch_ga_top_pages(GA_PROPERTY_ID, ga_start, ga_end)
+            ga_channels = fetch_ga_channels(GA_PROPERTY_ID, ga_start, ga_end, host_filter=ga_host_filter)
+            ga_top_pages = fetch_ga_top_pages(GA_PROPERTY_ID, ga_start, ga_end, host_filter=ga_host_filter)
     except Exception as e:
         st.error(f"No se pudo conectar con Google Analytics: {e}")
         st.caption("Verifica que la cuenta de servicio tenga acceso de 'Viewer' en la propiedad GA4 y que el Property ID sea correcto.")
@@ -1771,3 +1835,40 @@ else:  # 📈 Web Analytics
         )
     else:
         st.info("Sin datos de páginas para este período.")
+
+    st.divider()
+
+    # Desglose por dominio — cuy.pe vs secure.guinea.pe (siempre lado a lado, sin importar el filtro de dominio)
+    st.subheader("📱 Desglose por dominio")
+    st.caption("Sesiones, usuarios, tiempo en sitio, rebote y páginas top separados por cada dominio.")
+    try:
+        with st.spinner("Separando métricas por dominio..."):
+            ga_by_domain = fetch_ga_by_domain(GA_PROPERTY_ID, ga_start, ga_end, top_limit=5)
+    except Exception as e:
+        ga_by_domain = None
+        st.warning(f"No se pudo separar por dominio: {e}")
+
+    if ga_by_domain:
+        d1, d2 = st.columns(2)
+        for col, host, label in zip([d1, d2], ["cuy.pe", "secure.guinea.pe"], ["🐹 cuy.pe", "🔒 secure.guinea.pe"]):
+            with col:
+                st.markdown(f"**{label}**")
+                s = ga_by_domain[host]["summary"]
+                tp = ga_by_domain[host]["top_pages"]
+                if s and s["sessions"]:
+                    m1, m2 = st.columns(2)
+                    m1.metric("👥 Sesiones", f"{s['sessions']:,.0f}")
+                    m2.metric("🙋 Usuarios", f"{s['users']:,.0f}")
+                    m3, m4 = st.columns(2)
+                    m3.metric("⏱️ Tiempo en sitio", f"{s['avg_duration']:.0f} s")
+                    m4.metric("↩️ Rebote", f"{s['bounce_rate']:.1f}%")
+                    if tp is not None and not tp.empty:
+                        st.caption("Páginas más visitadas")
+                        st.dataframe(
+                            tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
+                            use_container_width=True, hide_index=True, height=200,
+                        )
+                    else:
+                        st.caption("Sin páginas registradas para este dominio en el período.")
+                else:
+                    st.info(f"Sin datos para **{host}** en este período.")
