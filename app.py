@@ -114,10 +114,33 @@ def fetch_campaigns(account_id: str, date_preset: str, since: str = "", until: s
     rows = []
     for c in campaigns:
         status   = c.get(Campaign.Field.effective_status, "")
-        insights = c.get_insights(fields=INSIGHT_FIELDS, params=insight_time_params)
+        insights = c.get_insights(
+            fields=INSIGHT_FIELDS,
+            params={**insight_time_params, "breakdowns": ["publisher_platform"]},
+        )
         if not insights:
             continue
-        ins       = insights[0]
+
+        # Sumar todas las filas (una por plataforma: facebook, instagram, audience_network, messenger)
+        totals = {"spend": 0.0, "impressions": 0, "clicks": 0, "reach": 0}
+        platform_spend = {"facebook": 0.0, "instagram": 0.0}
+        for ins_row in insights:
+            sp  = float(ins_row.get("spend", 0))
+            imp = int(ins_row.get("impressions", 0))
+            cl  = int(ins_row.get("clicks", 0))
+            rc  = int(ins_row.get("reach", 0))
+            totals["spend"]       += sp
+            totals["impressions"] += imp
+            totals["clicks"]      += cl
+            totals["reach"]       += rc
+            plat = ins_row.get("publisher_platform", "")
+            if plat in platform_spend:
+                platform_spend[plat] += sp
+
+        ctr       = (totals["clicks"] / totals["impressions"] * 100) if totals["impressions"] else 0.0
+        cpc       = (totals["spend"] / totals["clicks"]) if totals["clicks"] else 0.0
+        frequency = (totals["impressions"] / totals["reach"]) if totals["reach"] else 0.0
+
         start_raw = c.get(Campaign.Field.start_time, "")
         try:
             start_dt    = datetime.fromisoformat(start_raw)
@@ -131,13 +154,15 @@ def fetch_campaigns(account_id: str, date_preset: str, since: str = "", until: s
             "Objetivo":    c.get(Campaign.Field.objective, ""),
             "Presupuesto": int(c.get(Campaign.Field.daily_budget, 0)) / 100,
             "Días activa": dias_activa,
-            "Gasto":       float(ins.get("spend", 0)),
-            "Impresiones": int(ins.get("impressions", 0)),
-            "Clics":       int(ins.get("clicks", 0)),
-            "CTR":         float(ins.get("ctr", 0)),
-            "CPC":         float(ins.get("cpc", 0)),
-            "Alcance":     int(ins.get("reach", 0)),
-            "Frecuencia":  float(ins.get("frequency", 0)),
+            "Gasto":       totals["spend"],
+            "Gasto FB":    platform_spend["facebook"],
+            "Gasto IG":    platform_spend["instagram"],
+            "Impresiones": totals["impressions"],
+            "Clics":       totals["clicks"],
+            "CTR":         ctr,
+            "CPC":         cpc,
+            "Alcance":     totals["reach"],
+            "Frecuencia":  frequency,
         })
     return pd.DataFrame(rows)
 
@@ -550,6 +575,8 @@ with st.sidebar:
         else:
             st.warning("Selecciona una fecha de inicio y una de fin.")
 
+    platform_filter = st.selectbox("Plataforma (consumo)", ["Todas (FB+IG)", "Solo Facebook", "Solo Instagram"])
+
     show_paused   = st.toggle("Incluir campañas pausadas", value=False)
     if st.button("🔄 Actualizar datos", use_container_width=True):
         st.cache_data.clear()
@@ -582,19 +609,38 @@ with tab_dash:
 
         # KPIs
         st.subheader("Resumen del período")
+
+        total_spend_fb = view_df["Gasto FB"].sum()
+        total_spend_ig = view_df["Gasto IG"].sum()
+        total_spend_all = view_df["Gasto"].sum()
+
+        if platform_filter == "Solo Facebook":
+            total_spend = total_spend_fb
+        elif platform_filter == "Solo Instagram":
+            total_spend = total_spend_ig
+        else:
+            total_spend = total_spend_all
+
         k1, k2, k3, k4, k5, k6 = st.columns(6)
-        total_spend       = view_df["Gasto"].sum()
         total_impressions = view_df["Impresiones"].sum()
         total_clicks      = view_df["Clics"].sum()
         avg_ctr           = (total_clicks / total_impressions * 100) if total_impressions else 0
         avg_cpc           = (total_spend / total_clicks) if total_clicks else 0
         total_reach       = view_df["Alcance"].sum()
-        k1.metric("💰 Gasto",       f"${total_spend:,.2f}")
+        k1.metric("💰 Gasto", f"${total_spend:,.2f}")
         k2.metric("👁️ Impresiones", f"{total_impressions:,.0f}")
         k3.metric("🖱️ Clics",       f"{total_clicks:,.0f}")
         k4.metric("📊 CTR",         f"{avg_ctr:.2f}%")
         k5.metric("💲 CPC",         f"${avg_cpc:.3f}")
         k6.metric("🎯 Alcance",     f"{total_reach:,.0f}")
+
+        # Desglose de consumo por plataforma — siempre visible, sin importar el filtro
+        kp1, kp2, kp3 = st.columns(3)
+        kp1.metric("📘 Gasto Facebook",  f"${total_spend_fb:,.2f}")
+        kp2.metric("📸 Gasto Instagram", f"${total_spend_ig:,.2f}")
+        otras_plataformas = max(total_spend_all - total_spend_fb - total_spend_ig, 0)
+        kp3.metric("🌐 Otras (Audience Network, etc.)", f"${otras_plataformas:,.2f}")
+
         st.divider()
 
         # Gráficos
@@ -628,11 +674,12 @@ with tab_dash:
 
         # Tabla
         st.subheader("Detalle por campaña")
-        table_df = view_df[["Campaña", "Estado", "Gasto", "Impresiones",
+        table_df = view_df[["Campaña", "Estado", "Gasto", "Gasto FB", "Gasto IG", "Impresiones",
                              "Clics", "CTR", "CPC", "Alcance", "Frecuencia"]].copy()
         st.dataframe(
             table_df.style
-                .format({"Gasto": "${:.2f}", "CPC": "${:.3f}", "CTR": "{:.2f}%",
+                .format({"Gasto": "${:.2f}", "Gasto FB": "${:.2f}", "Gasto IG": "${:.2f}",
+                         "CPC": "${:.3f}", "CTR": "{:.2f}%",
                          "Frecuencia": "{:.2f}x", "Impresiones": "{:,.0f}",
                          "Clics": "{:,.0f}", "Alcance": "{:,.0f}"})
                 .map(lambda v: "color: #2ecc71" if isinstance(v, float) and v > 5
