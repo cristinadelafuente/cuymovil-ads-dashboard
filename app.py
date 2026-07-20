@@ -789,6 +789,137 @@ def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: 
     return pd.DataFrame(rows)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
+# ══════════════════════════════════════════════════════════════════════════════
+def generate_full_analysis(meta_df, ga_summary, ga_channels) -> str:
+    """Genera un análisis narrativo combinando Meta Ads y Web Analytics (basado en reglas, sin costo de API)."""
+    lines = []
+
+    if meta_df is not None and not meta_df.empty:
+        active = meta_df[meta_df["Estado"] == "ACTIVE"]
+        if not active.empty:
+            total_spend  = active["Gasto"].sum()
+            total_clicks = active["Clics"].sum()
+            total_impr   = active["Impresiones"].sum()
+            avg_ctr      = (total_clicks / total_impr * 100) if total_impr else 0
+            best  = active.loc[active["CTR"].idxmax()]
+            worst = active.loc[active["CTR"].idxmin()]
+            lines.append(
+                f"**Meta Ads:** gastaste **${total_spend:,.2f}** en {len(active)} campañas activas, "
+                f"generando {total_clicks:,.0f} clics con un CTR promedio de **{avg_ctr:.2f}%**."
+            )
+            lines.append(
+                f"La campaña con mejor rendimiento es **{best['Campaña']}** (CTR {best['CTR']:.2f}%). "
+                f"La de menor rendimiento es **{worst['Campaña']}** (CTR {worst['CTR']:.2f}%) — vale la pena revisarla."
+            )
+            suggestions = get_suggestions(active)
+            urgentes = [s for s in suggestions if s.get("urgency") == "ALTA"]
+            if urgentes:
+                lines.append(f"⚠️ Hay **{len(urgentes)} alerta(s) urgente(s)** — revísalas en la sección Meta Ads.")
+            else:
+                lines.append("✅ No hay alertas urgentes en tus campañas activas de Meta Ads.")
+        else:
+            lines.append("**Meta Ads:** no hay campañas activas en el período seleccionado.")
+    else:
+        lines.append("**Meta Ads:** no se pudo cargar información (verifica el token de acceso en Secrets).")
+
+    if ga_summary:
+        lines.append(
+            f"**Web Analytics:** tu sitio recibió **{ga_summary['sessions']:,.0f} sesiones** de "
+            f"**{ga_summary['users']:,.0f} usuarios**, con tasa de rebote de **{ga_summary['bounce_rate']:.1f}%** "
+            f"y {ga_summary['conversions']:,.0f} conversiones."
+        )
+        if ga_summary["bounce_rate"] > 60:
+            lines.append("⚠️ La tasa de rebote es alta (>60%) — revisa velocidad de carga o relevancia del contenido de aterrizaje.")
+        elif ga_summary["bounce_rate"] < 40:
+            lines.append("✅ La tasa de rebote es saludable (<40%), señal de que el contenido conecta bien con los visitantes.")
+        if ga_channels is not None and not ga_channels.empty:
+            top_channel = ga_channels.sort_values("Sesiones", ascending=False).iloc[0]
+            lines.append(f"El canal que más tráfico aporta es **{top_channel['Canal']}** con {top_channel['Sesiones']:,.0f} sesiones.")
+    else:
+        lines.append("**Web Analytics:** no se pudo cargar información (verifica la cuenta de servicio de Google en Secrets).")
+
+    lines.append("\n_Nota: Google Ads y Microsoft Clarity aún no están conectados a este dashboard._")
+    return "\n\n".join(lines)
+
+def answer_question(question: str, meta_df, ga_summary, ga_channels) -> str:
+    """Responde preguntas en lenguaje natural sobre las métricas cargadas (basado en reglas, sin costo de API)."""
+    q = question.lower()
+    active = meta_df[meta_df["Estado"] == "ACTIVE"] if meta_df is not None and not meta_df.empty else pd.DataFrame()
+
+    # ¿Menciona el nombre de una campaña específica?
+    if not active.empty:
+        for _, row in active.iterrows():
+            nombre = str(row["Campaña"]).lower()
+            palabras_clave = [w for w in nombre.split() if len(w) > 4]
+            if nombre in q or any(w in q for w in palabras_clave):
+                return (f"La campaña **{row['Campaña']}** tiene: Gasto ${row['Gasto']:.2f}, "
+                        f"{row['Impresiones']:,.0f} impresiones, {row['Clics']:,.0f} clics, "
+                        f"CTR {row['CTR']:.2f}%, CPC ${row['CPC']:.3f}, Frecuencia {row['Frecuencia']:.2f}x.")
+
+    if any(k in q for k in ["ctr", "click through"]):
+        if not active.empty and active["Impresiones"].sum():
+            avg_ctr = active["Clics"].sum() / active["Impresiones"].sum() * 100
+            calif = "excelente" if avg_ctr > 5 else "bueno" if avg_ctr >= 3 else "bajo, por debajo del mínimo recomendado (3%)"
+            return f"Tu CTR promedio en campañas activas es **{avg_ctr:.2f}%**, lo cual se considera {calif}."
+        return "No tengo datos de Meta Ads cargados para calcular el CTR."
+
+    if any(k in q for k in ["gasto", "presupuesto", "cuanto gaste", "cuánto gasté", "spend"]):
+        if not active.empty:
+            return f"El gasto total en campañas activas de Meta Ads en el período es **${active['Gasto'].sum():,.2f}**."
+        return "No tengo datos de gasto de Meta Ads cargados."
+
+    if any(k in q for k in ["frecuencia"]):
+        if not active.empty:
+            avg_freq = active["Frecuencia"].mean()
+            calif = "alta, con riesgo de saturación" if avg_freq > 4 else "normal"
+            return f"La frecuencia promedio de tus campañas activas es **{avg_freq:.2f}x**, considerada {calif}."
+        return "No tengo campañas activas cargadas."
+
+    if any(k in q for k in ["mejor campaña", "mejor campana", "top campaign"]):
+        if not active.empty:
+            best = active.loc[active["CTR"].idxmax()]
+            return f"Tu campaña con mejor CTR es **{best['Campaña']}** con {best['CTR']:.2f}%."
+        return "No tengo campañas activas cargadas."
+
+    if any(k in q for k in ["peor campaña", "peor campana", "revisar"]):
+        if not active.empty:
+            worst = active.loc[active["CTR"].idxmin()]
+            return f"La campaña con menor CTR es **{worst['Campaña']}** ({worst['CTR']:.2f}%) — podría necesitar revisión."
+        return "No tengo campañas activas cargadas."
+
+    if any(k in q for k in ["sesion", "sesión", "sesiones"]):
+        if ga_summary:
+            return f"Tu sitio tuvo **{ga_summary['sessions']:,.0f} sesiones** en el período seleccionado."
+        return "No tengo datos de Google Analytics cargados."
+
+    if any(k in q for k in ["rebote", "bounce"]):
+        if ga_summary:
+            calif = "alta, conviene revisarla" if ga_summary["bounce_rate"] > 60 else "saludable" if ga_summary["bounce_rate"] < 40 else "normal"
+            return f"Tu tasa de rebote es **{ga_summary['bounce_rate']:.1f}%**, lo cual es {calif}."
+        return "No tengo datos de Google Analytics cargados."
+
+    if any(k in q for k in ["usuario", "usuarios"]):
+        if ga_summary:
+            return f"Tu sitio tuvo **{ga_summary['users']:,.0f} usuarios** únicos en el período."
+        return "No tengo datos de Google Analytics cargados."
+
+    if any(k in q for k in ["conversion", "conversión", "conversiones"]):
+        if ga_summary:
+            return f"Se registraron **{ga_summary['conversions']:,.0f} conversiones** en el período."
+        return "No tengo datos de Google Analytics cargados."
+
+    if any(k in q for k in ["canal", "channel", "de donde viene", "de dónde viene", "trafico", "tráfico"]):
+        if ga_channels is not None and not ga_channels.empty:
+            top3 = ga_channels.sort_values("Sesiones", ascending=False).head(3)
+            detalle = "; ".join(f"{r['Canal']}: {r['Sesiones']:,.0f} sesiones" for _, r in top3.iterrows())
+            return f"Tus principales canales de tráfico son: {detalle}."
+        return "No tengo datos de canales de Google Analytics cargados."
+
+    return ("No logré identificar a qué dato te refieres. Intenta preguntar sobre: CTR, gasto, sesiones, "
+            "usuarios, rebote, conversiones, canales, frecuencia, o el nombre de una campaña específica.")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 col_title, col_time = st.columns([4, 1])
@@ -801,12 +932,39 @@ with st.sidebar:
     st.header("🗂️ Accesos")
     nav_section = st.radio(
         "Selecciona una plataforma",
-        ["📊 Meta Ads", "📈 Web Analytics"],
+        ["📋 Resumen", "📊 Meta Ads", "📈 Web Analytics"],
         label_visibility="collapsed",
     )
     st.divider()
 
-    if nav_section == "📊 Meta Ads":
+    if nav_section == "📋 Resumen":
+        st.subheader("Filtros — Resumen")
+        resumen_account_label = st.selectbox("Cuenta (Meta Ads)", list(ACCOUNTS.keys()), key="resumen_account_label")
+        resumen_account_id    = ACCOUNTS[resumen_account_label]
+        resumen_date_label    = st.selectbox("Período", list(DATE_OPTIONS.keys()), index=2, key="resumen_date_label")
+        resumen_date_preset   = DATE_OPTIONS[resumen_date_label]
+
+        resumen_since_str, resumen_until_str = "", ""
+        if resumen_date_preset == "custom":
+            hoy_peru_r = datetime.now(PERU_TZ).date()
+            resumen_custom_range = st.date_input(
+                "Rango de fechas",
+                value=(hoy_peru_r.replace(day=1), hoy_peru_r),
+                max_value=hoy_peru_r,
+                key="resumen_custom_range",
+            )
+            if isinstance(resumen_custom_range, tuple) and len(resumen_custom_range) == 2:
+                resumen_since_str = resumen_custom_range[0].strftime("%Y-%m-%d")
+                resumen_until_str = resumen_custom_range[1].strftime("%Y-%m-%d")
+            else:
+                st.warning("Selecciona una fecha de inicio y una de fin.")
+
+        if st.button("🔄 Actualizar datos", use_container_width=True, key="refresh_resumen"):
+            st.cache_data.clear()
+            st.rerun()
+        st.caption("Combina Meta Ads + Web Analytics. Google Ads y Clarity aún no están conectados.")
+
+    elif nav_section == "📊 Meta Ads":
         st.subheader("Filtros — Meta Ads")
         account_label = st.selectbox("Cuenta", list(ACCOUNTS.keys()))
         account_id    = ACCOUNTS[account_label]
@@ -859,7 +1017,68 @@ with st.sidebar:
             st.cache_data.clear()
             st.rerun()
 
-if nav_section == "📊 Meta Ads":
+if nav_section == "📋 Resumen":
+    st.header("📋 Resumen General")
+    st.caption("Vista unificada de todas las plataformas conectadas a este dashboard.")
+
+    meta_df_r    = None
+    ga_summary_r = None
+    ga_channels_r = None
+
+    if ACCESS_TOKEN:
+        try:
+            with st.spinner("Cargando datos de Meta Ads..."):
+                meta_df_r = fetch_campaigns(resumen_account_id, resumen_date_preset, resumen_since_str, resumen_until_str)
+        except Exception as e:
+            st.warning(f"No se pudo cargar Meta Ads: {e}")
+    else:
+        st.info("Meta Ads no está conectado (falta ACCESS_TOKEN en Secrets).")
+
+    if "gcp_service_account" in st.secrets:
+        try:
+            r_start, r_end = get_ga_date_range(resumen_date_preset, resumen_since_str, resumen_until_str)
+            with st.spinner("Cargando datos de Google Analytics..."):
+                ga_summary_r  = fetch_ga_summary(GA_PROPERTY_ID, r_start, r_end)
+                ga_channels_r = fetch_ga_channels(GA_PROPERTY_ID, r_start, r_end)
+        except Exception as e:
+            st.warning(f"No se pudo cargar Google Analytics: {e}")
+    else:
+        st.info("Google Analytics no está conectado (falta la cuenta de servicio en Secrets).")
+
+    st.divider()
+
+    # KPIs combinados de todas las plataformas
+    st.subheader("Métricas combinadas")
+    active_meta_r = meta_df_r[meta_df_r["Estado"] == "ACTIVE"] if meta_df_r is not None and not meta_df_r.empty else pd.DataFrame()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("💰 Gasto Meta Ads", f"${active_meta_r['Gasto'].sum():,.2f}" if not active_meta_r.empty else "—")
+    if not active_meta_r.empty and active_meta_r["Impresiones"].sum():
+        ctr_r = active_meta_r["Clics"].sum() / active_meta_r["Impresiones"].sum() * 100
+        k2.metric("📊 CTR Meta Ads", f"{ctr_r:.2f}%")
+    else:
+        k2.metric("📊 CTR Meta Ads", "—")
+    k3.metric("👥 Sesiones Web", f"{ga_summary_r['sessions']:,.0f}" if ga_summary_r else "—")
+    k4.metric("🎯 Conversiones Web", f"{ga_summary_r['conversions']:,.0f}" if ga_summary_r else "—")
+
+    st.divider()
+
+    # Análisis narrativo automático
+    st.subheader("🧠 Análisis completo")
+    st.markdown(generate_full_analysis(meta_df_r, ga_summary_r, ga_channels_r))
+
+    st.divider()
+
+    # Campo libre de preguntas
+    st.subheader("💬 Pregúntale a tus datos")
+    st.caption("Escribe una pregunta sobre tus métricas, por ejemplo: '¿cómo va mi CTR?', '¿cuántas sesiones tuve?', '¿cuál es mi mejor campaña?'.")
+    user_question = st.text_input("Tu pregunta", key="resumen_question", placeholder="Ej: ¿Cuál es mi tasa de rebote?")
+    if st.button("Preguntar", key="btn_resumen_question", type="primary"):
+        if user_question.strip():
+            st.info(answer_question(user_question, meta_df_r, ga_summary_r, ga_channels_r))
+        else:
+            st.warning("Escribe una pregunta primero.")
+
+elif nav_section == "📊 Meta Ads":
     if not ACCESS_TOKEN:
         st.error("Falta ACCESS_TOKEN. Agrégalo en Streamlit Cloud → Settings → Secrets.")
         st.stop()
