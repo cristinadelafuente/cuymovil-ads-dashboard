@@ -1029,6 +1029,8 @@ if nav_section == "📋 Resumen":
         try:
             with st.spinner("Cargando datos de Meta Ads..."):
                 meta_df_r = fetch_campaigns(resumen_account_id, resumen_date_preset, resumen_since_str, resumen_until_str)
+                if meta_df_r is not None and not meta_df_r.empty:
+                    meta_df_r = apply_platform_filter(meta_df_r, "Todas (FB+IG)")
         except Exception as e:
             st.warning(f"No se pudo cargar Meta Ads: {e}")
     else:
