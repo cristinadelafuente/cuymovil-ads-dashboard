@@ -13,6 +13,7 @@ from facebook_business.adobjects.targetingsearch import TargetingSearch
 import json
 import os
 import tempfile
+import requests
 from datetime import datetime, timezone, date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -140,6 +141,7 @@ APP_ID       = get_secret("APP_ID") or "1605641477375351"
 APP_SECRET   = get_secret("APP_SECRET")
 PAGE_ID      = get_secret("PAGE_ID")
 GA_PROPERTY_ID = get_secret("GA_PROPERTY_ID") or "255486373"
+CLARITY_API_TOKEN = get_secret("CLARITY_API_TOKEN")
 
 # ── Constantes ───────────────────────────────────────────────────────────────
 ACCOUNTS = {
@@ -817,6 +819,80 @@ def fetch_ga_by_domain(property_id: str, start_date: str, end_date: str, top_lim
     return result
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MICROSOFT CLARITY — Data Export API (10 llamadas/día por proyecto, máx. 3 días)
+# ══════════════════════════════════════════════════════════════════════════════
+CLARITY_DIMENSIONS = {
+    "Ninguna (agregado)": None,
+    "Navegador": "Browser",
+    "Dispositivo": "Device",
+    "País/Región": "Country/Region",
+    "Sistema operativo": "OS",
+    "Fuente (Source)": "Source",
+    "Medio (Medium)": "Medium",
+    "Campaña": "Campaign",
+    "Canal": "Channel",
+    "URL": "URL",
+}
+
+CLARITY_METRIC_LABELS = {
+    "Traffic": "🚦 Tráfico",
+    "Popular Pages": "📄 Páginas populares",
+    "Engagement Time": "⏱️ Tiempo de interacción",
+    "Scroll Depth": "📜 Profundidad de scroll",
+    "Dead Click Count": "💀 Clics muertos (sin respuesta)",
+    "Rage Click Count": "😤 Clics de frustración (rage clicks)",
+    "Quickback Click": "↩️ Regresos inmediatos (quickback)",
+    "Excessive Scroll": "🔄 Scroll excesivo",
+    "Script Error Count": "⚠️ Errores de script",
+    "Error Click Count": "🚫 Clics con error",
+}
+
+@st.cache_data(ttl=14400, show_spinner=False)  # 4h de caché — Clarity limita a 10 llamadas/día por proyecto
+def fetch_clarity_insights(num_days: int = 3, dimension1: str = None) -> list:
+    """Trae los datos crudos de la Clarity Data Export API."""
+    if not CLARITY_API_TOKEN:
+        return []
+    url = "https://www.clarity.ms/export-data/api/v1/project-live-insights"
+    params = {"numOfDays": num_days}
+    if dimension1:
+        params["dimension1"] = dimension1
+    headers = {
+        "Authorization": f"Bearer {CLARITY_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    response = requests.get(url, params=params, headers=headers, timeout=20)
+    if response.status_code == 429:
+        raise RuntimeError("Se alcanzó el límite diario de 10 llamadas a la API de Clarity. Los datos se actualizarán automáticamente mañana.")
+    if response.status_code == 401:
+        raise RuntimeError("Token de Clarity inválido o vencido. Verifica CLARITY_API_TOKEN en Secrets.")
+    response.raise_for_status()
+    return response.json()
+
+def clarity_metric_df(clarity_data: list, metric_name: str) -> pd.DataFrame:
+    """Extrae el bloque de una métrica específica de la respuesta de Clarity y lo convierte en DataFrame."""
+    for block in clarity_data or []:
+        if str(block.get("metricName", "")).lower() == metric_name.lower():
+            return pd.DataFrame(block.get("information", []))
+    return pd.DataFrame()
+
+def _clarity_col(df: pd.DataFrame, *candidates) -> pd.Series:
+    """Busca la primera columna existente entre varios nombres posibles (la API de Clarity varía nombres/mayúsculas)."""
+    for c in candidates:
+        if c in df.columns:
+            return pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return pd.Series([0] * len(df))
+
+def clarity_traffic_summary(clarity_data: list) -> dict:
+    """Suma las filas de la métrica 'Traffic' para obtener totales generales de sesiones y usuarios."""
+    df = clarity_metric_df(clarity_data, "Traffic")
+    if df.empty:
+        return {}
+    sessions = _clarity_col(df, "totalSessionCount", "TotalSessionCount").sum()
+    bots     = _clarity_col(df, "totalBotSessionCount", "TotalBotSessionCount").sum()
+    users    = _clarity_col(df, "distinctUserCount", "distantUserCount", "DistinctUserCount").sum()
+    return {"sessions": sessions, "bot_sessions": bots, "users": users}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
 # ══════════════════════════════════════════════════════════════════════════════
 def generate_full_analysis(meta_df, ga_summary, ga_channels, ga_top_pages=None) -> str:
@@ -887,7 +963,7 @@ def generate_full_analysis(meta_df, ga_summary, ga_channels, ga_top_pages=None) 
     else:
         lines.append("**Web Analytics:** no se pudo cargar información (verifica la cuenta de servicio de Google en Secrets).")
 
-    lines.append("\n_Nota: Google Ads y Microsoft Clarity aún no están conectados a este dashboard._")
+    lines.append("\n_Nota: Google Ads aún no está conectado a este dashboard. Revisa la sección 'Clarity' para señales de frustración de usuarios._")
     return "\n\n".join(lines)
 
 def answer_question(question: str, meta_df, ga_summary, ga_channels, ga_top_pages=None) -> str:
@@ -1003,7 +1079,7 @@ with st.sidebar:
     st.header("🗂️ Accesos")
     nav_section = st.radio(
         "Selecciona una plataforma",
-        ["📋 Resumen", "📊 Meta Ads", "📈 Web Analytics"],
+        ["📋 Resumen", "📊 Meta Ads", "📈 Web Analytics", "🖱️ Clarity"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -1033,7 +1109,7 @@ with st.sidebar:
         if st.button("🔄 Actualizar datos", use_container_width=True, key="refresh_resumen"):
             st.cache_data.clear()
             st.rerun()
-        st.caption("Combina Meta Ads + Web Analytics. Google Ads y Clarity aún no están conectados.")
+        st.caption("Combina Meta Ads + Web Analytics. Revisa la sección 'Clarity' para señales de frustración. Google Ads aún no está conectado.")
 
     elif nav_section == "📊 Meta Ads":
         st.subheader("Filtros — Meta Ads")
@@ -1063,7 +1139,7 @@ with st.sidebar:
             st.rerun()
         st.caption("Los cambios ejecutados son inmediatos y reales.")
 
-    else:
+    elif nav_section == "📈 Web Analytics":
         st.subheader("Filtros — Web Analytics")
         ga_host_label  = st.selectbox("Dominio", list(HOST_OPTIONS.keys()), key="ga_host_label")
         ga_host_filter = HOST_OPTIONS[ga_host_label]
@@ -1088,6 +1164,17 @@ with st.sidebar:
         st.caption(f"Propiedad GA4: `{GA_PROPERTY_ID}`")
         if st.button("🔄 Actualizar datos", use_container_width=True, key="refresh_ga"):
             st.cache_data.clear()
+            st.rerun()
+
+    else:
+        st.subheader("Filtros — Clarity")
+        clarity_days_label = st.selectbox("Días hacia atrás", ["Último día (1)", "Últimos 2 días", "Últimos 3 días"], index=2, key="clarity_days_label")
+        clarity_num_days = {"Último día (1)": 1, "Últimos 2 días": 2, "Últimos 3 días": 3}[clarity_days_label]
+        clarity_dim_label = st.selectbox("Desglosar por", list(CLARITY_DIMENSIONS.keys()), key="clarity_dim_label")
+        clarity_dimension = CLARITY_DIMENSIONS[clarity_dim_label]
+        st.caption("⚠️ La API de Clarity permite solo **10 llamadas al día** por proyecto. Los datos se cachean 4 horas — evita presionar 'Actualizar' repetidamente.")
+        if st.button("🔄 Actualizar datos de Clarity", use_container_width=True, key="refresh_clarity"):
+            fetch_clarity_insights.clear()
             st.rerun()
 
 if nav_section == "📋 Resumen":
@@ -1745,7 +1832,7 @@ elif nav_section == "📊 Meta Ads":
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — WEB ANALYTICS (Google Analytics 4)
 # ══════════════════════════════════════════════════════════════════════════════
-else:  # 📈 Web Analytics
+elif nav_section == "📈 Web Analytics":
     st.header("📈 Web Analytics")
 
     if "gcp_service_account" not in st.secrets:
@@ -1872,3 +1959,65 @@ else:  # 📈 Web Analytics
                         st.caption("Sin páginas registradas para este dominio en el período.")
                 else:
                     st.info(f"Sin datos para **{host}** en este período.")
+
+else:  # 🖱️ Clarity
+    st.header("🖱️ Microsoft Clarity")
+    st.caption("Mapas de calor, grabaciones de sesión y señales de frustración (rage clicks, dead clicks, etc).")
+
+    if not CLARITY_API_TOKEN:
+        st.error("Falta configurar el token de Clarity. Agrega `CLARITY_API_TOKEN` en Streamlit Cloud → Settings → Secrets.")
+        st.stop()
+
+    st.caption(f"Ventana: **{clarity_days_label}** · Desglose: **{clarity_dim_label}** · Límite: 10 llamadas/día por proyecto.")
+
+    try:
+        with st.spinner("Cargando datos de Clarity..."):
+            clarity_data = fetch_clarity_insights(clarity_num_days, clarity_dimension)
+    except Exception as e:
+        st.error(f"No se pudo conectar con Clarity: {e}")
+        st.stop()
+
+    if not clarity_data:
+        st.info("Sin datos disponibles para este período.")
+        st.stop()
+
+    # KPIs generales de tráfico
+    st.subheader("Resumen de tráfico")
+    traffic_summary = clarity_traffic_summary(clarity_data)
+    if traffic_summary:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("👥 Sesiones totales", f"{traffic_summary['sessions']:,.0f}")
+        c2.metric("🤖 Sesiones de bots", f"{traffic_summary['bot_sessions']:,.0f}")
+        c3.metric("🙋 Usuarios únicos", f"{traffic_summary['users']:,.0f}")
+    else:
+        st.info("Sin métricas de tráfico para este período.")
+
+    st.divider()
+
+    # Páginas populares
+    st.subheader("📄 Páginas populares")
+    pages_df = clarity_metric_df(clarity_data, "Popular Pages")
+    if not pages_df.empty:
+        st.dataframe(pages_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Sin datos de páginas populares para este período/desglose.")
+
+    st.divider()
+
+    # Señales de frustración e interacción
+    st.subheader("😤 Señales de frustración e interacción")
+    frustration_metrics = [
+        "Engagement Time", "Scroll Depth", "Dead Click Count", "Rage Click Count",
+        "Quickback Click", "Excessive Scroll", "Script Error Count", "Error Click Count",
+    ]
+    any_data = False
+    for metric in frustration_metrics:
+        df = clarity_metric_df(clarity_data, metric)
+        if not df.empty:
+            any_data = True
+            st.markdown(f"**{CLARITY_METRIC_LABELS.get(metric, metric)}**")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+    if not any_data:
+        st.info("Sin señales de frustración registradas para este período/desglose.")
+
+    st.caption("Nota: los nombres de columnas provienen tal cual de la API de Clarity — cada métrica puede traer campos distintos.")

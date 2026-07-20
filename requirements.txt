@@ -4,3 +4,4 @@ plotly>=5.22.0
 pandas>=2.2.0
 google-analytics-data>=0.18.0
 google-auth>=2.29.0
+requests>=2.31.0
