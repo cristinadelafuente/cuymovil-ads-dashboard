@@ -696,555 +696,592 @@ with col_time:
     st.caption(f"📅 {datetime.now(PERU_TZ).strftime('%d %b %Y, %H:%M')} (hora Perú)")
 
 with st.sidebar:
-    st.header("Filtros")
-    account_label = st.selectbox("Cuenta", list(ACCOUNTS.keys()))
-    account_id    = ACCOUNTS[account_label]
-    date_label    = st.selectbox("Período", list(DATE_OPTIONS.keys()), index=2)
-    date_preset   = DATE_OPTIONS[date_label]
-
-    since_str, until_str = "", ""
-    if date_preset == "custom":
-        hoy_peru = datetime.now(PERU_TZ).date()
-        custom_range = st.date_input(
-            "Rango de fechas",
-            value=(hoy_peru.replace(day=1), hoy_peru),
-            max_value=hoy_peru,
-        )
-        if isinstance(custom_range, tuple) and len(custom_range) == 2:
-            since_str = custom_range[0].strftime("%Y-%m-%d")
-            until_str = custom_range[1].strftime("%Y-%m-%d")
-        else:
-            st.warning("Selecciona una fecha de inicio y una de fin.")
-
-    platform_filter = st.selectbox("Plataforma (consumo)", ["Todas (FB+IG)", "Solo Facebook", "Solo Instagram"])
-
-    show_paused   = st.toggle("Incluir campañas pausadas", value=False)
-    if st.button("🔄 Actualizar datos", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-    st.divider()
-    st.caption("Los cambios ejecutados son inmediatos y reales.")
-
-if not ACCESS_TOKEN:
-    st.error("Falta ACCESS_TOKEN. Agrégalo en Streamlit Cloud → Settings → Secrets.")
-    st.stop()
-
-if date_preset == "custom" and not (since_str and until_str):
-    st.info("Selecciona un rango de fechas válido en el panel izquierdo para continuar.")
-    st.stop()
-
-# ── Tabs principales ──────────────────────────────────────────────────────────
-tab_dash, tab_create, tab_analytics = st.tabs(["📊 Dashboard", "➕ Crear Anuncio", "📈 Web Analytics"])
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — DASHBOARD
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_dash:
-    with st.spinner("Cargando datos de Meta Ads..."):
-        df = fetch_campaigns(account_id, date_preset, since_str, until_str)
-
-    if df.empty:
-        st.info("No hay datos disponibles para este período y cuenta.")
-    else:
-        raw_view_df = df if show_paused else df[df["Estado"] == "ACTIVE"]
-
-        # Desglose real por plataforma (siempre sobre el total, independiente del filtro)
-        total_spend_fb  = raw_view_df["Gasto_FB"].sum()
-        total_spend_ig  = raw_view_df["Gasto_IG"].sum()
-        total_spend_all = raw_view_df["Gasto_Total"].sum()
-
-        st.caption(f"🔎 Mostrando métricas de: **{platform_filter}**")
-
-        # Aplica el filtro de plataforma a TODAS las métricas (gasto, impresiones, clics, CTR, CPC, alcance, frecuencia)
-        view_df = apply_platform_filter(raw_view_df, platform_filter)
-
-        # KPIs
-        st.subheader("Resumen del período")
-
-        total_spend       = view_df["Gasto"].sum()
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
-        total_impressions = view_df["Impresiones"].sum()
-        total_clicks      = view_df["Clics"].sum()
-        avg_ctr           = (total_clicks / total_impressions * 100) if total_impressions else 0
-        avg_cpc           = (total_spend / total_clicks) if total_clicks else 0
-        total_reach       = view_df["Alcance"].sum()
-        k1.metric("💰 Gasto", f"${total_spend:,.2f}")
-        k2.metric("👁️ Impresiones", f"{total_impressions:,.0f}")
-        k3.metric("🖱️ Clics",       f"{total_clicks:,.0f}")
-        k4.metric("📊 CTR",         f"{avg_ctr:.2f}%")
-        k5.metric("💲 CPC",         f"${avg_cpc:.3f}")
-        k6.metric("🎯 Alcance",     f"{total_reach:,.0f}")
-
-        # Desglose de consumo por plataforma — siempre visible, sin importar el filtro
-        kp1, kp2, kp3 = st.columns(3)
-        kp1.metric("📘 Gasto Facebook",  f"${total_spend_fb:,.2f}")
-        kp2.metric("📸 Gasto Instagram", f"${total_spend_ig:,.2f}")
-        otras_plataformas = max(total_spend_all - total_spend_fb - total_spend_ig, 0)
-        kp3.metric("🌐 Otras (Audience Network, etc.)", f"${otras_plataformas:,.2f}")
-
-        st.divider()
-
-        # Gráficos
-        active_df = apply_platform_filter(df[df["Estado"] == "ACTIVE"], platform_filter)
-        if not active_df.empty:
-            g1, g2 = st.columns(2)
-            with g1:
-                st.subheader("Gasto por campaña")
-                fig = px.bar(
-                    active_df.sort_values("Gasto"),
-                    x="Gasto", y="Campaña", orientation="h",
-                    color="CTR", color_continuous_scale="RdYlGn",
-                    color_continuous_midpoint=active_df["CTR"].median(),
-                    labels={"Gasto": "Gasto (USD)", "CTR": "CTR%"}, text="Gasto",
-                )
-                fig.update_traces(texttemplate="$%{text:.0f}", textposition="outside")
-                fig.update_layout(height=380, margin=dict(l=0, r=20, t=0, b=0),
-                                  yaxis_title="", coloraxis_showscale=False)
-                st.plotly_chart(fig, use_container_width=True)
-            with g2:
-                st.subheader("CTR vs Frecuencia")
-                fig = px.scatter(
-                    active_df, x="Frecuencia", y="CTR", size="Gasto",
-                    hover_name="Campaña", color="CPC", color_continuous_scale="RdYlGn_r",
-                    labels={"CTR": "CTR (%)", "Frecuencia": "Frecuencia (veces)"},
-                )
-                fig.add_vline(x=4, line_dash="dash", line_color="red",
-                              annotation_text="Saturación", annotation_position="top right")
-                fig.update_layout(height=380, margin=dict(l=0, r=0, t=0, b=0))
-                st.plotly_chart(fig, use_container_width=True)
-
-        # Tabla
-        st.subheader("Detalle por campaña")
-        table_df = view_df[["Campaña", "Estado", "Gasto", "Gasto_FB", "Gasto_IG", "Impresiones",
-                             "Clics", "CTR", "CPC", "Alcance", "Frecuencia"]].copy()
-        table_df = table_df.rename(columns={"Gasto_FB": "Gasto FB", "Gasto_IG": "Gasto IG"})
-        st.dataframe(
-            table_df.style
-                .format({"Gasto": "${:.2f}", "Gasto FB": "${:.2f}", "Gasto IG": "${:.2f}",
-                         "CPC": "${:.3f}", "CTR": "{:.2f}%",
-                         "Frecuencia": "{:.2f}x", "Impresiones": "{:,.0f}",
-                         "Clics": "{:,.0f}", "Alcance": "{:,.0f}"})
-                .map(lambda v: "color: #2ecc71" if isinstance(v, float) and v > 5
-                               else "color: #e74c3c" if isinstance(v, float) and v < 3 else "",
-                     subset=["CTR"])
-                .map(lambda v: "color: #e74c3c" if isinstance(v, float) and v > 4 else "",
-                     subset=["Frecuencia"]),
-            use_container_width=True, hide_index=True,
-        )
-        st.divider()
-
-        # Sugerencias
-        st.subheader("💡 Sugerencias de acción")
-        if active_df.empty:
-            st.info("No hay campañas activas para analizar.")
-        else:
-            suggestions = get_suggestions(active_df)
-            if not suggestions:
-                st.success("✅ Todas las campañas activas están dentro de los rangos óptimos.")
-            else:
-                URGENCY_ICON = {"ALTA": "🔴", "MEDIA": "🟡", "BAJA": "🟢"}
-                ACTION_LABEL = {
-                    "PAUSE":            "⏸️ Pausar campaña",
-                    "INCREASE_BUDGET":  "⬆️ Aumentar presupuesto",
-                    "DECREASE_BUDGET":  "⬇️ Reducir presupuesto",
-                    "REFRESH_CREATIVE": "🎨 Acción manual requerida",
-                }
-                for i, s in enumerate(suggestions):
-                    icon   = URGENCY_ICON.get(s.get("urgency", ""), "⚪")
-                    action = s.get("action", "")
-                    name   = s.get("campaign_name", "")
-                    cid    = s.get("campaign_id", "")
-                    reason = s.get("reason", "")
-                    budget = s.get("new_budget_usd")
-                    with st.expander(f"{icon} **{name}** — {action}", expanded=True):
-                        st.write(reason)
-                        col_info, col_btn = st.columns([3, 1])
-                        with col_info:
-                            if budget:
-                                st.caption(f"Presupuesto sugerido: **${budget:.2f}/día**")
-                        with col_btn:
-                            btn_label = ACTION_LABEL.get(action, "Ejecutar")
-                            if action == "REFRESH_CREATIVE":
-                                st.info("Acción manual — ve a Ads Manager para actualizar la creatividad.")
-                            elif action == "PAUSE":
-                                if st.button(btn_label, key=f"btn_{i}", type="primary"):
-                                    c1, c2 = st.columns(2)
-                                    with c1:
-                                        if st.button("✅ Sí, pausar", key=f"confirm_{i}"):
-                                            with st.spinner("Pausando..."):
-                                                pause_campaign(cid)
-                                            st.success("Campaña pausada.")
-                                            st.cache_data.clear()
-                                    with c2:
-                                        if st.button("Cancelar", key=f"cancel_{i}"):
-                                            st.rerun()
-                            elif action in ("INCREASE_BUDGET", "DECREASE_BUDGET") and budget:
-                                if st.button(btn_label, key=f"btn_{i}", type="primary"):
-                                    with st.spinner("Actualizando presupuesto..."):
-                                        set_daily_budget(cid, budget)
-                                    st.success(f"Presupuesto actualizado a ${budget:.2f}/día")
-                                    st.cache_data.clear()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — CREAR ANUNCIO
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_create:
-    st.header("➕ Crear nuevo anuncio")
-    st.caption("El anuncio se crea en estado **PAUSADO**. Revísalo en Ads Manager antes de activarlo.")
-
-    # Page ID
-    page_id_input = PAGE_ID or ""
-    if not page_id_input:
-        st.warning("Configura `PAGE_ID` en Streamlit Cloud → Settings → Secrets con el ID de tu página de Facebook.")
-        page_id_input = st.text_input(
-            "O ingrésalo aquí temporalmente:",
-            placeholder="ej. 123456789012345",
-            help="Ve a tu página de Facebook → Acerca de → desplázate al fondo → 'ID de la página'"
-        )
-    else:
-        st.success(f"✅ Página configurada: `{page_id_input}`")
-
-    st.divider()
-
-    # ── PASO 1: Campaña ───────────────────────────────────────────────────────
-    st.subheader("1️⃣  Campaña")
-    p1a, p1b = st.columns(2)
-    with p1a:
-        camp_name = st.text_input("Nombre de la campaña *", placeholder="ej. JUL26_Ventas_Ilimitados")
-    with p1b:
-        obj_label = st.selectbox("Objetivo *", list(OBJECTIVES.keys()))
-        objective = OBJECTIVES[obj_label]
-
-    st.markdown("**¿Dónde quieres publicar?**")
-    PLATFORM_MAP = {"Facebook": "facebook", "Instagram": "instagram"}
-    platforms_selected = st.multiselect(
-        "Plataformas *", list(PLATFORM_MAP.keys()), default=["Facebook", "Instagram"]
+    st.header("🗂️ Accesos")
+    nav_section = st.radio(
+        "Selecciona una plataforma",
+        ["📊 Meta Ads", "📈 Web Analytics"],
+        label_visibility="collapsed",
     )
-
-    differentiate_budget = False
-    budget_by_platform = {}
-    if len(platforms_selected) == 2:
-        differentiate_budget = st.checkbox(
-            "Usar presupuestos diferenciados por plataforma",
-            help="Si lo activas, se crea un conjunto de anuncios independiente por cada plataforma, cada uno con su propio presupuesto diario.",
-        )
-
-    if differentiate_budget:
-        pb1, pb2 = st.columns(2)
-        budget_by_platform["facebook"]  = pb1.number_input("Presupuesto diario Facebook (USD) *", min_value=1.0, value=10.0, step=1.0)
-        budget_by_platform["instagram"] = pb2.number_input("Presupuesto diario Instagram (USD) *", min_value=1.0, value=10.0, step=1.0)
-        daily_budget_total = sum(budget_by_platform.values())
-    else:
-        daily_budget_total = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=10.0, step=1.0)
-
     st.divider()
 
-    # ── PASO 2: Audiencia ─────────────────────────────────────────────────────
-    st.subheader("2️⃣  Audiencia")
+    if nav_section == "📊 Meta Ads":
+        st.subheader("Filtros — Meta Ads")
+        account_label = st.selectbox("Cuenta", list(ACCOUNTS.keys()))
+        account_id    = ACCOUNTS[account_label]
+        date_label    = st.selectbox("Período", list(DATE_OPTIONS.keys()), index=2)
+        date_preset   = DATE_OPTIONS[date_label]
 
-    with st.expander("🤖 Asistente IA de segmentación", expanded=True):
-        st.markdown("Describe con tus palabras a quién quieres mostrarle el anuncio:")
-        ai_description = st.text_area(
-            "audience_desc",
-            placeholder='Ej: "Jóvenes peruanos de 18-30 años que usan smartphones y siguen páginas de competidores como Claro y Entel"',
-            height=80,
-            label_visibility="collapsed",
-        )
-        if st.button("✨ Generar sugerencia de segmentación", type="secondary"):
-            if ai_description.strip():
-                with st.spinner("Analizando tu audiencia y buscando intereses reales en Meta..."):
-                    sugg = ai_suggest_segmentation(ai_description)
-                    # Resolver cada término sugerido contra intereses REALES de Meta (no genéricos)
-                    resolved = []
-                    all_terms = sugg["brand_keywords"] + sugg["interest_keywords"]
-                    for term in all_terms[:8]:  # límite razonable de llamadas a la API
-                        match = resolve_best_interest(term)
-                        if match:
-                            resolved.append(match)
-                            st.session_state["selected_interests_map"][match["id"]] = match["name"]
-                    sugg["resolved_count"] = len(resolved)
-                    sugg["unresolved"] = [t for t in all_terms[:8] if t not in [r["name"] for r in resolved]]
-                st.session_state["ai_sugg"] = sugg
-            else:
-                st.warning("Escribe una descripción primero.")
-
-        if st.session_state.get("ai_sugg"):
-            sugg = st.session_state["ai_sugg"]
-            gender_label = {"all": "Todos", "male": "Hombres", "female": "Mujeres"}.get(sugg["gender"], "Todos")
-            sc1, sc2, sc3 = st.columns(3)
-            sc1.markdown(f"🌍 **Países:** {', '.join(sugg['countries'])}")
-            sc2.markdown(f"👤 **Edad:** {sugg['age_min']}–{sugg['age_max']} (banda angosta, no genérica)")
-            sc3.markdown(f"⚧️ **Género:** {gender_label}")
-            if sugg.get("resolved_count"):
-                st.success(f"✅ Se agregaron {sugg['resolved_count']} intereses **reales** de Meta directamente a tu selección (ver abajo, en '{'Intereses seleccionados'}').")
-            if sugg.get("unresolved"):
-                st.caption(f"No se encontraron en Meta como interés catalogado: {', '.join(sugg['unresolved'])} — puedes buscarlos manualmente abajo.")
-            if sugg.get("narrow_logic"):
-                st.caption("💡 Esta audiencia combina varias señales específicas — es intencionalmente más angosta que una segmentación genérica. Revisa el estimado de audiencia más abajo.")
-            for note in sugg.get("notes", []):
-                st.markdown(note)
-
-    # Campos de audiencia
-    ai_sugg = st.session_state.get("ai_sugg", {})
-    a1, a2 = st.columns(2)
-    with a1:
-        default_countries = [k for k, v in COUNTRIES_ES.items() if v in ai_sugg.get("countries", ["PE"])]
-        selected_countries_es = st.multiselect(
-            "Países *", list(COUNTRIES_ES.keys()),
-            default=default_countries or ["Perú"],
-        )
-        selected_countries = [COUNTRIES_ES[c] for c in selected_countries_es]
-    with a2:
-        gender_default_idx = {"all": 0, "male": 1, "female": 2}.get(ai_sugg.get("gender", "all"), 0)
-        gender_choice = st.radio("Género", ["Todos", "Hombres", "Mujeres"],
-                                 horizontal=True, index=gender_default_idx)
-        genders = {"Todos": [], "Hombres": [1], "Mujeres": [2]}[gender_choice]
-
-    age_min, age_max = st.slider(
-        "Rango de edad",
-        min_value=13, max_value=65,
-        value=(ai_sugg.get("age_min", 18), ai_sugg.get("age_max", 45)),
-    )
-
-    # Búsqueda de intereses
-    st.markdown("**Intereses** — busca y selecciona")
-    bi1, bi2 = st.columns([3, 1])
-    with bi1:
-        interest_query = st.text_input(
-            "interest_search", label_visibility="collapsed",
-            placeholder="ej. Telefonía móvil, Smartphones, Claro Peru…"
-        )
-    with bi2:
-        do_search = st.button("🔍 Buscar intereses")
-
-    if do_search:
-        if interest_query.strip():
-            with st.spinner("Consultando Meta..."):
-                found = search_meta_interests(interest_query)
-            st.session_state["interest_results"] = found
-        else:
-            st.warning("Escribe un término primero.")
-
-    # Acumulador persistente de intereses elegidos (sobrevive a nuevas búsquedas)
-    if "selected_interests_map" not in st.session_state:
-        st.session_state["selected_interests_map"] = {}  # id -> name
-
-    if "interest_results" in st.session_state:
-        results = st.session_state["interest_results"]
-        if results:
-            for r in results:
-                already = r["id"] in st.session_state["selected_interests_map"]
-                checked = st.checkbox(
-                    f"{r['name']}  (~{r['audience']:,.0f} personas)",
-                    value=already,
-                    key=f"chk_interest_{r['id']}",
-                )
-                if checked:
-                    st.session_state["selected_interests_map"][r["id"]] = r["name"]
-                elif already:
-                    del st.session_state["selected_interests_map"][r["id"]]
-        else:
-            st.info("Sin resultados — prueba otro término.")
-
-    # Mostrar todos los intereses elegidos hasta ahora (de todas las búsquedas)
-    if st.session_state["selected_interests_map"]:
-        st.markdown("**Intereses seleccionados:**")
-        for iid, iname in list(st.session_state["selected_interests_map"].items()):
-            rm_col1, rm_col2 = st.columns([5, 1])
-            rm_col1.write(f"🎯 {iname}")
-            if rm_col2.button("✕ Quitar", key=f"rm_interest_{iid}"):
-                del st.session_state["selected_interests_map"][iid]
-                st.rerun()
-
-    selected_interest_ids = list(st.session_state["selected_interests_map"].keys())
-
-    # Públicos Lookalike
-    st.markdown("**Públicos Lookalike** (basados en tus clientes o públicos existentes)")
-    lookalikes = fetch_lookalike_audiences(account_id)
-    selected_lookalike_ids = []
-    if lookalikes:
-        lookalike_options = {f"{a['name']}  (~{a['size']:,.0f} personas)": a["id"] for a in lookalikes}
-        chosen_lookalikes = st.multiselect("Selecciona públicos Lookalike:", list(lookalike_options.keys()))
-        selected_lookalike_ids = [lookalike_options[c] for c in chosen_lookalikes]
-    else:
-        st.caption("No se encontraron públicos Lookalike en esta cuenta. Puedes crear uno en Ads Manager → Públicos → Crear público → Lookalike, a partir de tu lista de clientes o de tu página.")
-
-    # Estimado real de audiencia — mide qué tan fina quedó la segmentación
-    if selected_countries:
-        with st.spinner("Calculando tamaño de audiencia..."):
-            audience_est = get_audience_estimate(
-                account_id, selected_countries, age_min, age_max, genders, selected_interest_ids
+        since_str, until_str = "", ""
+        if date_preset == "custom":
+            hoy_peru = datetime.now(PERU_TZ).date()
+            custom_range = st.date_input(
+                "Rango de fechas",
+                value=(hoy_peru.replace(day=1), hoy_peru),
+                max_value=hoy_peru,
             )
-        if audience_est is not None:
-            if audience_est < 50_000:
-                st.info(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — muy específica. Bien si buscas precisión, pero vigila que no sea tan chica que limite la entrega.")
-            elif audience_est < 500_000:
-                st.success(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — segmentación fina, buen equilibrio entre precisión y alcance.")
+            if isinstance(custom_range, tuple) and len(custom_range) == 2:
+                since_str = custom_range[0].strftime("%Y-%m-%d")
+                until_str = custom_range[1].strftime("%Y-%m-%d")
             else:
-                st.warning(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — todavía amplia. Agrega más intereses o acorta el rango de edad para afinar más.")
+                st.warning("Selecciona una fecha de inicio y una de fin.")
 
-    st.divider()
+        platform_filter = st.selectbox("Plataforma (consumo)", ["Todas (FB+IG)", "Solo Facebook", "Solo Instagram"])
+        show_paused   = st.toggle("Incluir campañas pausadas", value=False)
+        if st.button("🔄 Actualizar datos", use_container_width=True, key="refresh_meta"):
+            st.cache_data.clear()
+            st.rerun()
+        st.caption("Los cambios ejecutados son inmediatos y reales.")
 
-    # ── PASO 3: Creatividad ───────────────────────────────────────────────────
-    st.subheader("3️⃣  Creatividad del anuncio")
-
-    uploaded_image = st.file_uploader(
-        "Imagen del anuncio * (JPG o PNG — mín. 1080×1080 px recomendado)",
-        type=["jpg", "jpeg", "png"],
-    )
-    if uploaded_image:
-        st.image(uploaded_image, caption="Imagen cargada", width=280)
-
-    cr1, cr2 = st.columns(2)
-    with cr1:
-        primary_text = st.text_area(
-            "Texto principal *",
-            placeholder="Ej: ¡Conéctate sin límites con Cuy Móvil! 🐹 Planes desde S/39.",
-            height=100,
-        )
-        headline = st.text_input("Titular *", placeholder="Ej: Plan Ilimitado desde S/39")
-    with cr2:
-        ad_description = st.text_input("Descripción", placeholder="Ej: Sin cortes, sin límites. Pruébalo gratis 7 días.")
-        destination_url = st.text_input("URL de destino *", placeholder="https://cuymovil.pe")
-        cta_label = st.selectbox("Botón de acción (CTA)", list(CTA_OPTIONS.keys()))
-        cta_type  = CTA_OPTIONS[cta_label]
-
-    # Vista previa del anuncio (usa la API de Meta, no publica nada)
-    st.markdown("**👁️ Vista previa del anuncio**")
-    preview_platform_label = st.radio(
-        "Ver como se vería en:",
-        ["Facebook (feed móvil)", "Instagram (feed)"],
-        horizontal=True,
-    )
-    preview_ad_format = "MOBILE_FEED_STANDARD" if "Facebook" in preview_platform_label else "INSTAGRAM_STANDARD"
-
-    if st.button("🔍 Generar vista previa"):
-        if not uploaded_image or not page_id_input or not destination_url:
-            st.warning("Sube una imagen, indica el ID de página y la URL de destino antes de generar la vista previa.")
-        else:
-            with st.spinner("Generando vista previa con Meta..."):
-                try:
-                    preview_image_bytes = uploaded_image.getvalue()
-                    preview_image_ext = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
-                    preview_hash = upload_ad_image(account_id, preview_image_bytes, preview_image_ext)
-                    st.session_state["preview_image_hash"] = preview_hash
-                    preview_html = get_ad_preview_html(
-                        account_id, page_id_input, preview_hash,
-                        primary_text or " ", headline or " ", ad_description or "",
-                        destination_url, cta_type, preview_ad_format,
-                    )
-                    st.session_state["preview_html"] = preview_html
-                except Exception as e:
-                    st.error(f"No se pudo generar la vista previa: {e}")
-
-    if st.session_state.get("preview_html"):
-        st.components.v1.html(st.session_state["preview_html"], height=600, scrolling=True)
-
-    st.divider()
-
-    # ── PASO 4: Detalles finales ──────────────────────────────────────────────
-    st.subheader("4️⃣  Detalles finales")
-    d1, d2 = st.columns(2)
-    with d1:
-        start_date = st.date_input("Fecha de inicio", value=date.today())
-    with d2:
-        if differentiate_budget:
-            resumen_presupuesto = " · ".join(f"{k.capitalize()}: ${v:.2f}/día" for k, v in budget_by_platform.items())
-        else:
-            resumen_presupuesto = f"${daily_budget_total:.2f}/día ({', '.join(platforms_selected) or 'sin plataforma'})"
-        st.info(f"**Cuenta:** {account_label}\n\n**Presupuesto:** {resumen_presupuesto}")
-
-    st.divider()
-
-    # ── Validación y botón de publicar ────────────────────────────────────────
-    missing = []
-    if not camp_name:          missing.append("Nombre de campaña")
-    if not page_id_input:      missing.append("ID de página de Facebook")
-    if not destination_url:    missing.append("URL de destino")
-    if not primary_text:       missing.append("Texto principal")
-    if not headline:           missing.append("Titular")
-    if not uploaded_image:     missing.append("Imagen del anuncio")
-    if not selected_countries: missing.append("Al menos un país")
-    if not platforms_selected: missing.append("Al menos una plataforma (Facebook o Instagram)")
-
-    if missing:
-        st.warning("Faltan campos requeridos: " + "  ·  ".join(missing))
-        st.button("🚀 Crear anuncio (pausado)", type="primary", disabled=True)
     else:
-        if st.button("🚀 Crear anuncio (pausado)", type="primary"):
-            with st.spinner("Creando campaña → conjunto(s) → imagen → creatividad → anuncio(s)…"):
-                try:
-                    image_bytes = uploaded_image.read()
-                    image_ext   = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+        st.subheader("Filtros — Web Analytics")
+        ga_date_label  = st.selectbox("Período", list(DATE_OPTIONS.keys()), index=2, key="ga_date_label")
+        ga_date_preset = DATE_OPTIONS[ga_date_label]
 
-                    # Armar la configuración de conjuntos de anuncios por plataforma
-                    if differentiate_budget:
-                        adset_configs = []
-                        if "Facebook" in platforms_selected:
-                            adset_configs.append({"platforms": ["facebook"], "budget": budget_by_platform["facebook"], "suffix": "FB"})
-                        if "Instagram" in platforms_selected:
-                            adset_configs.append({"platforms": ["instagram"], "budget": budget_by_platform["instagram"], "suffix": "IG"})
-                    else:
-                        chosen_platform_codes = [PLATFORM_MAP[p] for p in platforms_selected]
-                        adset_configs = [{"platforms": chosen_platform_codes, "budget": daily_budget_total, "suffix": ""}]
+        ga_since_str, ga_until_str = "", ""
+        if ga_date_preset == "custom":
+            hoy_peru_ga = datetime.now(PERU_TZ).date()
+            ga_custom_range = st.date_input(
+                "Rango de fechas",
+                value=(hoy_peru_ga.replace(day=1), hoy_peru_ga),
+                max_value=hoy_peru_ga,
+                key="ga_custom_range",
+            )
+            if isinstance(ga_custom_range, tuple) and len(ga_custom_range) == 2:
+                ga_since_str = ga_custom_range[0].strftime("%Y-%m-%d")
+                ga_until_str = ga_custom_range[1].strftime("%Y-%m-%d")
+            else:
+                st.warning("Selecciona una fecha de inicio y una de fin.")
 
-                    result = create_full_ad(
-                        account_id=account_id,
-                        page_id=page_id_input,
-                        camp_name=camp_name,
-                        objective=objective,
-                        adset_configs=adset_configs,
-                        countries=selected_countries,
-                        age_min=age_min,
-                        age_max=age_max,
-                        genders=genders,
-                        interest_ids=selected_interest_ids,
-                        custom_audience_ids=selected_lookalike_ids,
-                        image_bytes=image_bytes,
-                        image_ext=image_ext,
-                        primary_text=primary_text,
-                        headline=headline,
-                        ad_description=ad_description,
-                        destination_url=destination_url,
-                        cta_type=cta_type,
-                        start_date=start_date,
+        st.caption(f"Propiedad GA4: `{GA_PROPERTY_ID}`")
+        if st.button("🔄 Actualizar datos", use_container_width=True, key="refresh_ga"):
+            st.cache_data.clear()
+            st.rerun()
+
+if nav_section == "📊 Meta Ads":
+    if not ACCESS_TOKEN:
+        st.error("Falta ACCESS_TOKEN. Agrégalo en Streamlit Cloud → Settings → Secrets.")
+        st.stop()
+
+    if date_preset == "custom" and not (since_str and until_str):
+        st.info("Selecciona un rango de fechas válido en el panel izquierdo para continuar.")
+        st.stop()
+
+    # ── Tabs internas de Meta Ads ──────────────────────────────────────────────
+    tab_dash, tab_create = st.tabs(["📊 Dashboard", "➕ Crear Anuncio"])
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 1 — DASHBOARD
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab_dash:
+        with st.spinner("Cargando datos de Meta Ads..."):
+            df = fetch_campaigns(account_id, date_preset, since_str, until_str)
+
+        if df.empty:
+            st.info("No hay datos disponibles para este período y cuenta.")
+        else:
+            raw_view_df = df if show_paused else df[df["Estado"] == "ACTIVE"]
+
+            # Desglose real por plataforma (siempre sobre el total, independiente del filtro)
+            total_spend_fb  = raw_view_df["Gasto_FB"].sum()
+            total_spend_ig  = raw_view_df["Gasto_IG"].sum()
+            total_spend_all = raw_view_df["Gasto_Total"].sum()
+
+            st.caption(f"🔎 Mostrando métricas de: **{platform_filter}**")
+
+            # Aplica el filtro de plataforma a TODAS las métricas (gasto, impresiones, clics, CTR, CPC, alcance, frecuencia)
+            view_df = apply_platform_filter(raw_view_df, platform_filter)
+
+            # KPIs
+            st.subheader("Resumen del período")
+
+            total_spend       = view_df["Gasto"].sum()
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            total_impressions = view_df["Impresiones"].sum()
+            total_clicks      = view_df["Clics"].sum()
+            avg_ctr           = (total_clicks / total_impressions * 100) if total_impressions else 0
+            avg_cpc           = (total_spend / total_clicks) if total_clicks else 0
+            total_reach       = view_df["Alcance"].sum()
+            k1.metric("💰 Gasto", f"${total_spend:,.2f}")
+            k2.metric("👁️ Impresiones", f"{total_impressions:,.0f}")
+            k3.metric("🖱️ Clics",       f"{total_clicks:,.0f}")
+            k4.metric("📊 CTR",         f"{avg_ctr:.2f}%")
+            k5.metric("💲 CPC",         f"${avg_cpc:.3f}")
+            k6.metric("🎯 Alcance",     f"{total_reach:,.0f}")
+
+            # Desglose de consumo por plataforma — siempre visible, sin importar el filtro
+            kp1, kp2, kp3 = st.columns(3)
+            kp1.metric("📘 Gasto Facebook",  f"${total_spend_fb:,.2f}")
+            kp2.metric("📸 Gasto Instagram", f"${total_spend_ig:,.2f}")
+            otras_plataformas = max(total_spend_all - total_spend_fb - total_spend_ig, 0)
+            kp3.metric("🌐 Otras (Audience Network, etc.)", f"${otras_plataformas:,.2f}")
+
+            st.divider()
+
+            # Gráficos
+            active_df = apply_platform_filter(df[df["Estado"] == "ACTIVE"], platform_filter)
+            if not active_df.empty:
+                g1, g2 = st.columns(2)
+                with g1:
+                    st.subheader("Gasto por campaña")
+                    fig = px.bar(
+                        active_df.sort_values("Gasto"),
+                        x="Gasto", y="Campaña", orientation="h",
+                        color="CTR", color_continuous_scale="RdYlGn",
+                        color_continuous_midpoint=active_df["CTR"].median(),
+                        labels={"Gasto": "Gasto (USD)", "CTR": "CTR%"}, text="Gasto",
                     )
+                    fig.update_traces(texttemplate="$%{text:.0f}", textposition="outside")
+                    fig.update_layout(height=380, margin=dict(l=0, r=20, t=0, b=0),
+                                      yaxis_title="", coloraxis_showscale=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                with g2:
+                    st.subheader("CTR vs Frecuencia")
+                    fig = px.scatter(
+                        active_df, x="Frecuencia", y="CTR", size="Gasto",
+                        hover_name="Campaña", color="CPC", color_continuous_scale="RdYlGn_r",
+                        labels={"CTR": "CTR (%)", "Frecuencia": "Frecuencia (veces)"},
+                    )
+                    fig.add_vline(x=4, line_dash="dash", line_color="red",
+                                  annotation_text="Saturación", annotation_position="top right")
+                    fig.update_layout(height=380, margin=dict(l=0, r=0, t=0, b=0))
+                    st.plotly_chart(fig, use_container_width=True)
 
-                    st.success("✅ ¡Anuncio creado exitosamente en estado PAUSADO!")
-                    r1, r2 = st.columns(2)
-                    with r1:
-                        adsets_md = "\n".join(
-                            f"- 👥 Conjunto ({', '.join(a['platforms'])}, ${a['budget']:.2f}/día): `{a['adset_id']}` → Anuncio: `{a['ad_id']}`"
-                            for a in result["adsets"]
+            # Tabla
+            st.subheader("Detalle por campaña")
+            table_df = view_df[["Campaña", "Estado", "Gasto", "Gasto_FB", "Gasto_IG", "Impresiones",
+                                 "Clics", "CTR", "CPC", "Alcance", "Frecuencia"]].copy()
+            table_df = table_df.rename(columns={"Gasto_FB": "Gasto FB", "Gasto_IG": "Gasto IG"})
+            st.dataframe(
+                table_df.style
+                    .format({"Gasto": "${:.2f}", "Gasto FB": "${:.2f}", "Gasto IG": "${:.2f}",
+                             "CPC": "${:.3f}", "CTR": "{:.2f}%",
+                             "Frecuencia": "{:.2f}x", "Impresiones": "{:,.0f}",
+                             "Clics": "{:,.0f}", "Alcance": "{:,.0f}"})
+                    .map(lambda v: "color: #2ecc71" if isinstance(v, float) and v > 5
+                                   else "color: #e74c3c" if isinstance(v, float) and v < 3 else "",
+                         subset=["CTR"])
+                    .map(lambda v: "color: #e74c3c" if isinstance(v, float) and v > 4 else "",
+                         subset=["Frecuencia"]),
+                use_container_width=True, hide_index=True,
+            )
+            st.divider()
+
+            # Sugerencias
+            st.subheader("💡 Sugerencias de acción")
+            if active_df.empty:
+                st.info("No hay campañas activas para analizar.")
+            else:
+                suggestions = get_suggestions(active_df)
+                if not suggestions:
+                    st.success("✅ Todas las campañas activas están dentro de los rangos óptimos.")
+                else:
+                    URGENCY_ICON = {"ALTA": "🔴", "MEDIA": "🟡", "BAJA": "🟢"}
+                    ACTION_LABEL = {
+                        "PAUSE":            "⏸️ Pausar campaña",
+                        "INCREASE_BUDGET":  "⬆️ Aumentar presupuesto",
+                        "DECREASE_BUDGET":  "⬇️ Reducir presupuesto",
+                        "REFRESH_CREATIVE": "🎨 Acción manual requerida",
+                    }
+                    for i, s in enumerate(suggestions):
+                        icon   = URGENCY_ICON.get(s.get("urgency", ""), "⚪")
+                        action = s.get("action", "")
+                        name   = s.get("campaign_name", "")
+                        cid    = s.get("campaign_id", "")
+                        reason = s.get("reason", "")
+                        budget = s.get("new_budget_usd")
+                        with st.expander(f"{icon} **{name}** — {action}", expanded=True):
+                            st.write(reason)
+                            col_info, col_btn = st.columns([3, 1])
+                            with col_info:
+                                if budget:
+                                    st.caption(f"Presupuesto sugerido: **${budget:.2f}/día**")
+                            with col_btn:
+                                btn_label = ACTION_LABEL.get(action, "Ejecutar")
+                                if action == "REFRESH_CREATIVE":
+                                    st.info("Acción manual — ve a Ads Manager para actualizar la creatividad.")
+                                elif action == "PAUSE":
+                                    if st.button(btn_label, key=f"btn_{i}", type="primary"):
+                                        c1, c2 = st.columns(2)
+                                        with c1:
+                                            if st.button("✅ Sí, pausar", key=f"confirm_{i}"):
+                                                with st.spinner("Pausando..."):
+                                                    pause_campaign(cid)
+                                                st.success("Campaña pausada.")
+                                                st.cache_data.clear()
+                                        with c2:
+                                            if st.button("Cancelar", key=f"cancel_{i}"):
+                                                st.rerun()
+                                elif action in ("INCREASE_BUDGET", "DECREASE_BUDGET") and budget:
+                                    if st.button(btn_label, key=f"btn_{i}", type="primary"):
+                                        with st.spinner("Actualizando presupuesto..."):
+                                            set_daily_budget(cid, budget)
+                                        st.success(f"Presupuesto actualizado a ${budget:.2f}/día")
+                                        st.cache_data.clear()
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 2 — CREAR ANUNCIO
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab_create:
+        st.header("➕ Crear nuevo anuncio")
+        st.caption("El anuncio se crea en estado **PAUSADO**. Revísalo en Ads Manager antes de activarlo.")
+
+        # Page ID
+        page_id_input = PAGE_ID or ""
+        if not page_id_input:
+            st.warning("Configura `PAGE_ID` en Streamlit Cloud → Settings → Secrets con el ID de tu página de Facebook.")
+            page_id_input = st.text_input(
+                "O ingrésalo aquí temporalmente:",
+                placeholder="ej. 123456789012345",
+                help="Ve a tu página de Facebook → Acerca de → desplázate al fondo → 'ID de la página'"
+            )
+        else:
+            st.success(f"✅ Página configurada: `{page_id_input}`")
+
+        st.divider()
+
+        # ── PASO 1: Campaña ───────────────────────────────────────────────────────
+        st.subheader("1️⃣  Campaña")
+        p1a, p1b = st.columns(2)
+        with p1a:
+            camp_name = st.text_input("Nombre de la campaña *", placeholder="ej. JUL26_Ventas_Ilimitados")
+        with p1b:
+            obj_label = st.selectbox("Objetivo *", list(OBJECTIVES.keys()))
+            objective = OBJECTIVES[obj_label]
+
+        st.markdown("**¿Dónde quieres publicar?**")
+        PLATFORM_MAP = {"Facebook": "facebook", "Instagram": "instagram"}
+        platforms_selected = st.multiselect(
+            "Plataformas *", list(PLATFORM_MAP.keys()), default=["Facebook", "Instagram"]
+        )
+
+        differentiate_budget = False
+        budget_by_platform = {}
+        if len(platforms_selected) == 2:
+            differentiate_budget = st.checkbox(
+                "Usar presupuestos diferenciados por plataforma",
+                help="Si lo activas, se crea un conjunto de anuncios independiente por cada plataforma, cada uno con su propio presupuesto diario.",
+            )
+
+        if differentiate_budget:
+            pb1, pb2 = st.columns(2)
+            budget_by_platform["facebook"]  = pb1.number_input("Presupuesto diario Facebook (USD) *", min_value=1.0, value=10.0, step=1.0)
+            budget_by_platform["instagram"] = pb2.number_input("Presupuesto diario Instagram (USD) *", min_value=1.0, value=10.0, step=1.0)
+            daily_budget_total = sum(budget_by_platform.values())
+        else:
+            daily_budget_total = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=10.0, step=1.0)
+
+        st.divider()
+
+        # ── PASO 2: Audiencia ─────────────────────────────────────────────────────
+        st.subheader("2️⃣  Audiencia")
+
+        with st.expander("🤖 Asistente IA de segmentación", expanded=True):
+            st.markdown("Describe con tus palabras a quién quieres mostrarle el anuncio:")
+            ai_description = st.text_area(
+                "audience_desc",
+                placeholder='Ej: "Jóvenes peruanos de 18-30 años que usan smartphones y siguen páginas de competidores como Claro y Entel"',
+                height=80,
+                label_visibility="collapsed",
+            )
+            if st.button("✨ Generar sugerencia de segmentación", type="secondary"):
+                if ai_description.strip():
+                    with st.spinner("Analizando tu audiencia y buscando intereses reales en Meta..."):
+                        sugg = ai_suggest_segmentation(ai_description)
+                        # Resolver cada término sugerido contra intereses REALES de Meta (no genéricos)
+                        resolved = []
+                        all_terms = sugg["brand_keywords"] + sugg["interest_keywords"]
+                        for term in all_terms[:8]:  # límite razonable de llamadas a la API
+                            match = resolve_best_interest(term)
+                            if match:
+                                resolved.append(match)
+                                st.session_state["selected_interests_map"][match["id"]] = match["name"]
+                        sugg["resolved_count"] = len(resolved)
+                        sugg["unresolved"] = [t for t in all_terms[:8] if t not in [r["name"] for r in resolved]]
+                    st.session_state["ai_sugg"] = sugg
+                else:
+                    st.warning("Escribe una descripción primero.")
+
+            if st.session_state.get("ai_sugg"):
+                sugg = st.session_state["ai_sugg"]
+                gender_label = {"all": "Todos", "male": "Hombres", "female": "Mujeres"}.get(sugg["gender"], "Todos")
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.markdown(f"🌍 **Países:** {', '.join(sugg['countries'])}")
+                sc2.markdown(f"👤 **Edad:** {sugg['age_min']}–{sugg['age_max']} (banda angosta, no genérica)")
+                sc3.markdown(f"⚧️ **Género:** {gender_label}")
+                if sugg.get("resolved_count"):
+                    st.success(f"✅ Se agregaron {sugg['resolved_count']} intereses **reales** de Meta directamente a tu selección (ver abajo, en '{'Intereses seleccionados'}').")
+                if sugg.get("unresolved"):
+                    st.caption(f"No se encontraron en Meta como interés catalogado: {', '.join(sugg['unresolved'])} — puedes buscarlos manualmente abajo.")
+                if sugg.get("narrow_logic"):
+                    st.caption("💡 Esta audiencia combina varias señales específicas — es intencionalmente más angosta que una segmentación genérica. Revisa el estimado de audiencia más abajo.")
+                for note in sugg.get("notes", []):
+                    st.markdown(note)
+
+        # Campos de audiencia
+        ai_sugg = st.session_state.get("ai_sugg", {})
+        a1, a2 = st.columns(2)
+        with a1:
+            default_countries = [k for k, v in COUNTRIES_ES.items() if v in ai_sugg.get("countries", ["PE"])]
+            selected_countries_es = st.multiselect(
+                "Países *", list(COUNTRIES_ES.keys()),
+                default=default_countries or ["Perú"],
+            )
+            selected_countries = [COUNTRIES_ES[c] for c in selected_countries_es]
+        with a2:
+            gender_default_idx = {"all": 0, "male": 1, "female": 2}.get(ai_sugg.get("gender", "all"), 0)
+            gender_choice = st.radio("Género", ["Todos", "Hombres", "Mujeres"],
+                                     horizontal=True, index=gender_default_idx)
+            genders = {"Todos": [], "Hombres": [1], "Mujeres": [2]}[gender_choice]
+
+        age_min, age_max = st.slider(
+            "Rango de edad",
+            min_value=13, max_value=65,
+            value=(ai_sugg.get("age_min", 18), ai_sugg.get("age_max", 45)),
+        )
+
+        # Búsqueda de intereses
+        st.markdown("**Intereses** — busca y selecciona")
+        bi1, bi2 = st.columns([3, 1])
+        with bi1:
+            interest_query = st.text_input(
+                "interest_search", label_visibility="collapsed",
+                placeholder="ej. Telefonía móvil, Smartphones, Claro Peru…"
+            )
+        with bi2:
+            do_search = st.button("🔍 Buscar intereses")
+
+        if do_search:
+            if interest_query.strip():
+                with st.spinner("Consultando Meta..."):
+                    found = search_meta_interests(interest_query)
+                st.session_state["interest_results"] = found
+            else:
+                st.warning("Escribe un término primero.")
+
+        # Acumulador persistente de intereses elegidos (sobrevive a nuevas búsquedas)
+        if "selected_interests_map" not in st.session_state:
+            st.session_state["selected_interests_map"] = {}  # id -> name
+
+        if "interest_results" in st.session_state:
+            results = st.session_state["interest_results"]
+            if results:
+                for r in results:
+                    already = r["id"] in st.session_state["selected_interests_map"]
+                    checked = st.checkbox(
+                        f"{r['name']}  (~{r['audience']:,.0f} personas)",
+                        value=already,
+                        key=f"chk_interest_{r['id']}",
+                    )
+                    if checked:
+                        st.session_state["selected_interests_map"][r["id"]] = r["name"]
+                    elif already:
+                        del st.session_state["selected_interests_map"][r["id"]]
+            else:
+                st.info("Sin resultados — prueba otro término.")
+
+        # Mostrar todos los intereses elegidos hasta ahora (de todas las búsquedas)
+        if st.session_state["selected_interests_map"]:
+            st.markdown("**Intereses seleccionados:**")
+            for iid, iname in list(st.session_state["selected_interests_map"].items()):
+                rm_col1, rm_col2 = st.columns([5, 1])
+                rm_col1.write(f"🎯 {iname}")
+                if rm_col2.button("✕ Quitar", key=f"rm_interest_{iid}"):
+                    del st.session_state["selected_interests_map"][iid]
+                    st.rerun()
+
+        selected_interest_ids = list(st.session_state["selected_interests_map"].keys())
+
+        # Públicos Lookalike
+        st.markdown("**Públicos Lookalike** (basados en tus clientes o públicos existentes)")
+        lookalikes = fetch_lookalike_audiences(account_id)
+        selected_lookalike_ids = []
+        if lookalikes:
+            lookalike_options = {f"{a['name']}  (~{a['size']:,.0f} personas)": a["id"] for a in lookalikes}
+            chosen_lookalikes = st.multiselect("Selecciona públicos Lookalike:", list(lookalike_options.keys()))
+            selected_lookalike_ids = [lookalike_options[c] for c in chosen_lookalikes]
+        else:
+            st.caption("No se encontraron públicos Lookalike en esta cuenta. Puedes crear uno en Ads Manager → Públicos → Crear público → Lookalike, a partir de tu lista de clientes o de tu página.")
+
+        # Estimado real de audiencia — mide qué tan fina quedó la segmentación
+        if selected_countries:
+            with st.spinner("Calculando tamaño de audiencia..."):
+                audience_est = get_audience_estimate(
+                    account_id, selected_countries, age_min, age_max, genders, selected_interest_ids
+                )
+            if audience_est is not None:
+                if audience_est < 50_000:
+                    st.info(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — muy específica. Bien si buscas precisión, pero vigila que no sea tan chica que limite la entrega.")
+                elif audience_est < 500_000:
+                    st.success(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — segmentación fina, buen equilibrio entre precisión y alcance.")
+                else:
+                    st.warning(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — todavía amplia. Agrega más intereses o acorta el rango de edad para afinar más.")
+
+        st.divider()
+
+        # ── PASO 3: Creatividad ───────────────────────────────────────────────────
+        st.subheader("3️⃣  Creatividad del anuncio")
+
+        uploaded_image = st.file_uploader(
+            "Imagen del anuncio * (JPG o PNG — mín. 1080×1080 px recomendado)",
+            type=["jpg", "jpeg", "png"],
+        )
+        if uploaded_image:
+            st.image(uploaded_image, caption="Imagen cargada", width=280)
+
+        cr1, cr2 = st.columns(2)
+        with cr1:
+            primary_text = st.text_area(
+                "Texto principal *",
+                placeholder="Ej: ¡Conéctate sin límites con Cuy Móvil! 🐹 Planes desde S/39.",
+                height=100,
+            )
+            headline = st.text_input("Titular *", placeholder="Ej: Plan Ilimitado desde S/39")
+        with cr2:
+            ad_description = st.text_input("Descripción", placeholder="Ej: Sin cortes, sin límites. Pruébalo gratis 7 días.")
+            destination_url = st.text_input("URL de destino *", placeholder="https://cuymovil.pe")
+            cta_label = st.selectbox("Botón de acción (CTA)", list(CTA_OPTIONS.keys()))
+            cta_type  = CTA_OPTIONS[cta_label]
+
+        # Vista previa del anuncio (usa la API de Meta, no publica nada)
+        st.markdown("**👁️ Vista previa del anuncio**")
+        preview_platform_label = st.radio(
+            "Ver como se vería en:",
+            ["Facebook (feed móvil)", "Instagram (feed)"],
+            horizontal=True,
+        )
+        preview_ad_format = "MOBILE_FEED_STANDARD" if "Facebook" in preview_platform_label else "INSTAGRAM_STANDARD"
+
+        if st.button("🔍 Generar vista previa"):
+            if not uploaded_image or not page_id_input or not destination_url:
+                st.warning("Sube una imagen, indica el ID de página y la URL de destino antes de generar la vista previa.")
+            else:
+                with st.spinner("Generando vista previa con Meta..."):
+                    try:
+                        preview_image_bytes = uploaded_image.getvalue()
+                        preview_image_ext = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+                        preview_hash = upload_ad_image(account_id, preview_image_bytes, preview_image_ext)
+                        st.session_state["preview_image_hash"] = preview_hash
+                        preview_html = get_ad_preview_html(
+                            account_id, page_id_input, preview_hash,
+                            primary_text or " ", headline or " ", ad_description or "",
+                            destination_url, cta_type, preview_ad_format,
                         )
-                        st.markdown(f"""
-**IDs generados:**
-- 📢 Campaña: `{result['campaign_id']}`
-- 🎨 Creatividad: `{result['creative_id']}`
-{adsets_md}
-                        """)
-                    with r2:
-                        mgr_url = f"https://www.facebook.com/adsmanager/manage/campaigns?act={account_id.replace('act_', '')}"
-                        st.markdown(f"### [📋 Ver en Ads Manager]({mgr_url})")
-                        st.info("Cuando estés lista, actívalo desde Ads Manager.")
-                    st.session_state["preview_html"] = None
-                    st.cache_data.clear()
+                        st.session_state["preview_html"] = preview_html
+                    except Exception as e:
+                        st.error(f"No se pudo generar la vista previa: {e}")
 
-                except Exception as e:
-                    st.error(f"Error al crear el anuncio: {e}")
-                    st.caption("Abre los logs en 'Manage app' para ver el detalle.")
+        if st.session_state.get("preview_html"):
+            st.components.v1.html(st.session_state["preview_html"], height=600, scrolling=True)
+
+        st.divider()
+
+        # ── PASO 4: Detalles finales ──────────────────────────────────────────────
+        st.subheader("4️⃣  Detalles finales")
+        d1, d2 = st.columns(2)
+        with d1:
+            start_date = st.date_input("Fecha de inicio", value=date.today())
+        with d2:
+            if differentiate_budget:
+                resumen_presupuesto = " · ".join(f"{k.capitalize()}: ${v:.2f}/día" for k, v in budget_by_platform.items())
+            else:
+                resumen_presupuesto = f"${daily_budget_total:.2f}/día ({', '.join(platforms_selected) or 'sin plataforma'})"
+            st.info(f"**Cuenta:** {account_label}\n\n**Presupuesto:** {resumen_presupuesto}")
+
+        st.divider()
+
+        # ── Validación y botón de publicar ────────────────────────────────────────
+        missing = []
+        if not camp_name:          missing.append("Nombre de campaña")
+        if not page_id_input:      missing.append("ID de página de Facebook")
+        if not destination_url:    missing.append("URL de destino")
+        if not primary_text:       missing.append("Texto principal")
+        if not headline:           missing.append("Titular")
+        if not uploaded_image:     missing.append("Imagen del anuncio")
+        if not selected_countries: missing.append("Al menos un país")
+        if not platforms_selected: missing.append("Al menos una plataforma (Facebook o Instagram)")
+
+        if missing:
+            st.warning("Faltan campos requeridos: " + "  ·  ".join(missing))
+            st.button("🚀 Crear anuncio (pausado)", type="primary", disabled=True)
+        else:
+            if st.button("🚀 Crear anuncio (pausado)", type="primary"):
+                with st.spinner("Creando campaña → conjunto(s) → imagen → creatividad → anuncio(s)…"):
+                    try:
+                        image_bytes = uploaded_image.read()
+                        image_ext   = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+
+                        # Armar la configuración de conjuntos de anuncios por plataforma
+                        if differentiate_budget:
+                            adset_configs = []
+                            if "Facebook" in platforms_selected:
+                                adset_configs.append({"platforms": ["facebook"], "budget": budget_by_platform["facebook"], "suffix": "FB"})
+                            if "Instagram" in platforms_selected:
+                                adset_configs.append({"platforms": ["instagram"], "budget": budget_by_platform["instagram"], "suffix": "IG"})
+                        else:
+                            chosen_platform_codes = [PLATFORM_MAP[p] for p in platforms_selected]
+                            adset_configs = [{"platforms": chosen_platform_codes, "budget": daily_budget_total, "suffix": ""}]
+
+                        result = create_full_ad(
+                            account_id=account_id,
+                            page_id=page_id_input,
+                            camp_name=camp_name,
+                            objective=objective,
+                            adset_configs=adset_configs,
+                            countries=selected_countries,
+                            age_min=age_min,
+                            age_max=age_max,
+                            genders=genders,
+                            interest_ids=selected_interest_ids,
+                            custom_audience_ids=selected_lookalike_ids,
+                            image_bytes=image_bytes,
+                            image_ext=image_ext,
+                            primary_text=primary_text,
+                            headline=headline,
+                            ad_description=ad_description,
+                            destination_url=destination_url,
+                            cta_type=cta_type,
+                            start_date=start_date,
+                        )
+
+                        st.success("✅ ¡Anuncio creado exitosamente en estado PAUSADO!")
+                        r1, r2 = st.columns(2)
+                        with r1:
+                            adsets_md = "\n".join(
+                                f"- 👥 Conjunto ({', '.join(a['platforms'])}, ${a['budget']:.2f}/día): `{a['adset_id']}` → Anuncio: `{a['ad_id']}`"
+                                for a in result["adsets"]
+                            )
+                            st.markdown(f"""
+    **IDs generados:**
+    - 📢 Campaña: `{result['campaign_id']}`
+    - 🎨 Creatividad: `{result['creative_id']}`
+    {adsets_md}
+                            """)
+                        with r2:
+                            mgr_url = f"https://www.facebook.com/adsmanager/manage/campaigns?act={account_id.replace('act_', '')}"
+                            st.markdown(f"### [📋 Ver en Ads Manager]({mgr_url})")
+                            st.info("Cuando estés lista, actívalo desde Ads Manager.")
+                        st.session_state["preview_html"] = None
+                        st.cache_data.clear()
+
+                    except Exception as e:
+                        st.error(f"Error al crear el anuncio: {e}")
+                        st.caption("Abre los logs en 'Manage app' para ver el detalle.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — WEB ANALYTICS (Google Analytics 4)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_analytics:
+else:  # 📈 Web Analytics
     st.header("📈 Web Analytics")
 
     if "gcp_service_account" not in st.secrets:
         st.error("Falta configurar la cuenta de servicio de Google. Agrega el bloque `[gcp_service_account]` en Streamlit Cloud → Settings → Secrets.")
         st.stop()
 
-    ga_start, ga_end = get_ga_date_range(date_preset, since_str, until_str)
+    if ga_date_preset == "custom" and not (ga_since_str and ga_until_str):
+        st.info("Selecciona un rango de fechas válido en el panel izquierdo para continuar.")
+        st.stop()
+
+    ga_start, ga_end = get_ga_date_range(ga_date_preset, ga_since_str, ga_until_str)
     st.caption(f"Período: **{ga_start}** a **{ga_end}** · Propiedad GA4: `{GA_PROPERTY_ID}`")
 
     try:
@@ -1297,19 +1334,12 @@ with tab_analytics:
 
     st.divider()
 
-    # Comparación directa con el gasto en Meta Ads del mismo período
-    st.subheader("💡 Sesiones desde Meta Ads vs. gasto")
+    # Tráfico proveniente de redes sociales pagadas
+    st.subheader("🔵 Tráfico vía Paid Social")
     paid_social_row = ga_channels[ga_channels["Canal"].str.contains("Paid Social", case=False, na=False)]
     sessions_paid_social = paid_social_row["Sesiones"].sum() if not paid_social_row.empty else 0
-    c1, c2, c3 = st.columns(3)
-    c1.metric("🔵 Sesiones vía Paid Social", f"{sessions_paid_social:,.0f}")
-    if "view_df" in globals() and not view_df.empty:
-        gasto_periodo_meta = view_df["Gasto"].sum()
-        c2.metric("💰 Gasto en Meta Ads (mismo período)", f"${gasto_periodo_meta:,.2f}")
-        costo_por_sesion = (gasto_periodo_meta / sessions_paid_social) if sessions_paid_social else 0
-        c3.metric("💲 Costo por sesión (Paid Social)", f"${costo_por_sesion:.3f}")
-    else:
-        c2.info("Ve a la pestaña Dashboard para ver el gasto de Meta Ads del período.")
+    st.metric("Sesiones vía Paid Social", f"{sessions_paid_social:,.0f}")
+    st.caption("Para comparar contra el gasto de Meta Ads del mismo período, revisa la sección '📊 Meta Ads' en el panel izquierdo.")
 
     st.divider()
 
