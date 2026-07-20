@@ -823,6 +823,7 @@ if nav_section == "📊 Meta Ads":
                 g1, g2 = st.columns(2)
                 with g1:
                     st.subheader("Gasto por campaña")
+                    max_gasto = active_df["Gasto"].max()
                     fig = px.bar(
                         active_df.sort_values("Gasto"),
                         x="Gasto", y="Campaña", orientation="h",
@@ -830,9 +831,12 @@ if nav_section == "📊 Meta Ads":
                         color_continuous_midpoint=active_df["CTR"].median(),
                         labels={"Gasto": "Gasto (USD)", "CTR": "CTR%"}, text="Gasto",
                     )
-                    fig.update_traces(texttemplate="$%{text:.0f}", textposition="outside")
-                    fig.update_layout(height=380, margin=dict(l=0, r=20, t=0, b=0),
-                                      yaxis_title="", coloraxis_showscale=False)
+                    fig.update_traces(texttemplate="$%{text:.0f}", textposition="outside", cliponaxis=False)
+                    fig.update_layout(
+                        height=380, margin=dict(l=0, r=60, t=0, b=0),
+                        yaxis_title="", coloraxis_showscale=False,
+                        xaxis=dict(range=[0, max_gasto * 1.18]),
+                    )
                     st.plotly_chart(fig, use_container_width=True)
                 with g2:
                     st.subheader("CTR vs Frecuencia")
@@ -1320,14 +1324,19 @@ else:  # 📈 Web Analytics
     with g2:
         st.subheader("Sesiones por canal")
         if not ga_channels.empty:
+            channels_sorted = ga_channels.sort_values("Sesiones")
+            max_sesiones = channels_sorted["Sesiones"].max()
             fig = px.bar(
-                ga_channels.sort_values("Sesiones"),
+                channels_sorted,
                 x="Sesiones", y="Canal", orientation="h",
                 color="Conversiones", color_continuous_scale="Blues",
                 text="Sesiones",
             )
-            fig.update_traces(texttemplate="%{text:.0f}", textposition="outside")
-            fig.update_layout(height=380, margin=dict(l=0, r=20, t=0, b=0), yaxis_title="")
+            fig.update_traces(texttemplate="%{text:.0f}", textposition="outside", cliponaxis=False)
+            fig.update_layout(
+                height=380, margin=dict(l=0, r=60, t=0, b=0), yaxis_title="",
+                xaxis=dict(range=[0, max_sesiones * 1.18]),
+            )
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Sin datos de canales para este período.")
