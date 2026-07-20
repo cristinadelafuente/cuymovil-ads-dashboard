@@ -13,7 +13,7 @@ from facebook_business.adobjects.targetingsearch import TargetingSearch
 import json
 import os
 import tempfile
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from zoneinfo import ZoneInfo
 
 PERU_TZ = ZoneInfo("America/Lima")
@@ -37,6 +37,7 @@ ACCESS_TOKEN = get_secret("ACCESS_TOKEN")
 APP_ID       = get_secret("APP_ID") or "1605641477375351"
 APP_SECRET   = get_secret("APP_SECRET")
 PAGE_ID      = get_secret("PAGE_ID")
+GA_PROPERTY_ID = get_secret("GA_PROPERTY_ID") or "255486373"
 
 # ── Constantes ───────────────────────────────────────────────────────────────
 ACCOUNTS = {
@@ -572,6 +573,120 @@ def create_full_ad(
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE ANALYTICS (GA4) — métricas de la web
+# ══════════════════════════════════════════════════════════════════════════════
+def get_ga_date_range(date_preset: str, since_str: str = "", until_str: str = ""):
+    """Traduce el mismo filtro de período del sidebar a fechas concretas para GA4."""
+    hoy = datetime.now(PERU_TZ).date()
+    if date_preset == "custom" and since_str and until_str:
+        return since_str, until_str
+    if date_preset == "last_7d":
+        start, end = hoy - timedelta(days=7), hoy - timedelta(days=1)
+    elif date_preset == "last_14d":
+        start, end = hoy - timedelta(days=14), hoy - timedelta(days=1)
+    elif date_preset == "last_30d":
+        start, end = hoy - timedelta(days=30), hoy - timedelta(days=1)
+    elif date_preset == "last_90d":
+        start, end = hoy - timedelta(days=90), hoy - timedelta(days=1)
+    elif date_preset == "this_month":
+        start, end = hoy.replace(day=1), hoy
+    elif date_preset == "last_month":
+        first_this_month = hoy.replace(day=1)
+        last_day_prev = first_this_month - timedelta(days=1)
+        start, end = last_day_prev.replace(day=1), last_day_prev
+    else:
+        start, end = hoy - timedelta(days=30), hoy
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+def init_ga_client():
+    from google.analytics.data_v1beta import BetaAnalyticsDataClient
+    from google.oauth2 import service_account
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+    return BetaAnalyticsDataClient(credentials=credentials)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga_summary(property_id: str, start_date: str, end_date: str) -> dict:
+    from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Metric
+    client = init_ga_client()
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        metrics=[
+            Metric(name="sessions"), Metric(name="activeUsers"), Metric(name="screenPageViews"),
+            Metric(name="conversions"), Metric(name="bounceRate"), Metric(name="averageSessionDuration"),
+        ],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+    )
+    response = client.run_report(request)
+    if not response.rows:
+        return {"sessions": 0, "users": 0, "pageviews": 0, "conversions": 0, "bounce_rate": 0.0, "avg_duration": 0.0}
+    v = [float(m.value) for m in response.rows[0].metric_values]
+    bounce = v[4] * 100 if v[4] <= 1 else v[4]
+    return {"sessions": v[0], "users": v[1], "pageviews": v[2], "conversions": v[3],
+            "bounce_rate": bounce, "avg_duration": v[5]}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga_timeseries(property_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+    from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
+    client = init_ga_client()
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=[Dimension(name="date")],
+        metrics=[Metric(name="sessions"), Metric(name="activeUsers")],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+        order_bys=[OrderBy(dimension=OrderBy.DimensionOrderBy(dimension_name="date"))],
+    )
+    response = client.run_report(request)
+    rows = []
+    for r in response.rows:
+        d = r.dimension_values[0].value  # formato YYYYMMDD
+        rows.append({
+            "Fecha": datetime.strptime(d, "%Y%m%d").date(),
+            "Sesiones": float(r.metric_values[0].value),
+            "Usuarios": float(r.metric_values[1].value),
+        })
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga_channels(property_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+    from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
+    client = init_ga_client()
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=[Dimension(name="sessionDefaultChannelGroup")],
+        metrics=[Metric(name="sessions"), Metric(name="conversions")],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
+    )
+    response = client.run_report(request)
+    rows = [{
+        "Canal": r.dimension_values[0].value or "(sin asignar)",
+        "Sesiones": float(r.metric_values[0].value),
+        "Conversiones": float(r.metric_values[1].value),
+    } for r in response.rows]
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: int = 10) -> pd.DataFrame:
+    from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
+    client = init_ga_client()
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=[Dimension(name="pagePath")],
+        metrics=[Metric(name="screenPageViews"), Metric(name="activeUsers")],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="screenPageViews"), desc=True)],
+        limit=limit,
+    )
+    response = client.run_report(request)
+    rows = [{
+        "Página": r.dimension_values[0].value,
+        "Vistas": float(r.metric_values[0].value),
+        "Usuarios": float(r.metric_values[1].value),
+    } for r in response.rows]
+    return pd.DataFrame(rows)
+
+# ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 col_title, col_time = st.columns([4, 1])
@@ -619,7 +734,7 @@ if date_preset == "custom" and not (since_str and until_str):
     st.stop()
 
 # ── Tabs principales ──────────────────────────────────────────────────────────
-tab_dash, tab_create = st.tabs(["📊 Dashboard", "➕ Crear Anuncio"])
+tab_dash, tab_create, tab_analytics = st.tabs(["📊 Dashboard", "➕ Crear Anuncio", "📈 Web Analytics"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — DASHBOARD
@@ -1118,3 +1233,92 @@ with tab_create:
                 except Exception as e:
                     st.error(f"Error al crear el anuncio: {e}")
                     st.caption("Abre los logs en 'Manage app' para ver el detalle.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — WEB ANALYTICS (Google Analytics 4)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_analytics:
+    st.header("📈 Web Analytics")
+
+    if "gcp_service_account" not in st.secrets:
+        st.error("Falta configurar la cuenta de servicio de Google. Agrega el bloque `[gcp_service_account]` en Streamlit Cloud → Settings → Secrets.")
+        st.stop()
+
+    ga_start, ga_end = get_ga_date_range(date_preset, since_str, until_str)
+    st.caption(f"Período: **{ga_start}** a **{ga_end}** · Propiedad GA4: `{GA_PROPERTY_ID}`")
+
+    try:
+        with st.spinner("Cargando datos de Google Analytics..."):
+            ga_summary = fetch_ga_summary(GA_PROPERTY_ID, ga_start, ga_end)
+            ga_timeseries = fetch_ga_timeseries(GA_PROPERTY_ID, ga_start, ga_end)
+            ga_channels = fetch_ga_channels(GA_PROPERTY_ID, ga_start, ga_end)
+            ga_top_pages = fetch_ga_top_pages(GA_PROPERTY_ID, ga_start, ga_end)
+    except Exception as e:
+        st.error(f"No se pudo conectar con Google Analytics: {e}")
+        st.caption("Verifica que la cuenta de servicio tenga acceso de 'Viewer' en la propiedad GA4 y que el Property ID sea correcto.")
+        st.stop()
+
+    # KPIs
+    st.subheader("Resumen del período")
+    a1, a2, a3, a4, a5, a6 = st.columns(6)
+    a1.metric("👥 Sesiones",       f"{ga_summary['sessions']:,.0f}")
+    a2.metric("🙋 Usuarios",       f"{ga_summary['users']:,.0f}")
+    a3.metric("📄 Vistas de página", f"{ga_summary['pageviews']:,.0f}")
+    a4.metric("🎯 Conversiones",   f"{ga_summary['conversions']:,.0f}")
+    a5.metric("↩️ Tasa de rebote", f"{ga_summary['bounce_rate']:.1f}%")
+    a6.metric("⏱️ Duración prom.", f"{ga_summary['avg_duration']:.0f} s")
+
+    st.divider()
+
+    # Gráfico de tendencia + canales
+    g1, g2 = st.columns(2)
+    with g1:
+        st.subheader("Sesiones por día")
+        if not ga_timeseries.empty:
+            fig = px.line(ga_timeseries, x="Fecha", y=["Sesiones", "Usuarios"], markers=True)
+            fig.update_layout(height=380, margin=dict(l=0, r=0, t=0, b=0), legend_title="")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para este período.")
+    with g2:
+        st.subheader("Sesiones por canal")
+        if not ga_channels.empty:
+            fig = px.bar(
+                ga_channels.sort_values("Sesiones"),
+                x="Sesiones", y="Canal", orientation="h",
+                color="Conversiones", color_continuous_scale="Blues",
+                text="Sesiones",
+            )
+            fig.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+            fig.update_layout(height=380, margin=dict(l=0, r=20, t=0, b=0), yaxis_title="")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos de canales para este período.")
+
+    st.divider()
+
+    # Comparación directa con el gasto en Meta Ads del mismo período
+    st.subheader("💡 Sesiones desde Meta Ads vs. gasto")
+    paid_social_row = ga_channels[ga_channels["Canal"].str.contains("Paid Social", case=False, na=False)]
+    sessions_paid_social = paid_social_row["Sesiones"].sum() if not paid_social_row.empty else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🔵 Sesiones vía Paid Social", f"{sessions_paid_social:,.0f}")
+    if "view_df" in globals() and not view_df.empty:
+        gasto_periodo_meta = view_df["Gasto"].sum()
+        c2.metric("💰 Gasto en Meta Ads (mismo período)", f"${gasto_periodo_meta:,.2f}")
+        costo_por_sesion = (gasto_periodo_meta / sessions_paid_social) if sessions_paid_social else 0
+        c3.metric("💲 Costo por sesión (Paid Social)", f"${costo_por_sesion:.3f}")
+    else:
+        c2.info("Ve a la pestaña Dashboard para ver el gasto de Meta Ads del período.")
+
+    st.divider()
+
+    # Top páginas
+    st.subheader("Páginas más visitadas")
+    if not ga_top_pages.empty:
+        st.dataframe(
+            ga_top_pages.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.info("Sin datos de páginas para este período.")
