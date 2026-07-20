@@ -26,6 +26,108 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Identidad de marca (Cuy Visual Guidelines) ────────────────────────────────
+BRAND = {
+    "purple":        "#5543CE",
+    "purple_dark":   "#150C54",
+    "purple_darker": "#261A7C",
+    "purple_light":  "#9F91FF",
+    "purple_pale":   "#F1EFFF",
+    "lemon":         "#DCFE6D",
+    "lemon_dark":    "#6E8426",
+    "lemon_pale":    "#F1FFC5",
+    "white":         "#FFFFFF",
+}
+
+# Escalas continuas de marca para gráficos Plotly
+PURPLE_SCALE = ["#F1EFFF", "#C8C0FF", "#9F91FF", "#735FF7", "#5543CE", "#3C2CA5", "#150C54"]
+LEMON_SCALE  = ["#FBFFF0", "#F1FFC5", "#E7FF99", "#DCFE6D", "#B6D552", "#92AC3A", "#4B5B16"]
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+html, body, [class*="css"], .stApp, [data-testid="stAppViewContainer"] {{
+    font-family: 'Outfit', sans-serif !important;
+}}
+
+h1, h2, h3, h4, h5, h6 {{
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 600 !important;
+    color: {BRAND["purple_dark"]} !important;
+}}
+
+/* Sidebar con acento de marca */
+[data-testid="stSidebar"] {{
+    background-color: {BRAND["purple_pale"]};
+    border-right: 2px solid {BRAND["purple"]};
+}}
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {{
+    color: {BRAND["purple_dark"]} !important;
+}}
+
+/* Botones — forma de cuadrado redondeado (motivo de la "Y" del logo) */
+.stButton > button, .stDownloadButton > button {{
+    border-radius: 14px !important;
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 500 !important;
+    border: none !important;
+}}
+.stButton > button[kind="primary"] {{
+    background-color: {BRAND["purple"]} !important;
+    color: {BRAND["white"]} !important;
+}}
+.stButton > button[kind="primary"]:hover {{
+    background-color: {BRAND["purple_dark"]} !important;
+}}
+.stButton > button[kind="secondary"] {{
+    background-color: {BRAND["lemon"]} !important;
+    color: {BRAND["purple_dark"]} !important;
+}}
+
+/* Tarjetas de métricas (st.metric) con esquinas redondeadas */
+[data-testid="stMetric"] {{
+    background-color: {BRAND["purple_pale"]};
+    border: 1px solid {BRAND["purple_light"]};
+    border-radius: 16px;
+    padding: 14px 16px;
+}}
+[data-testid="stMetricLabel"] {{
+    color: {BRAND["purple_dark"]} !important;
+}}
+[data-testid="stMetricValue"] {{
+    color: {BRAND["purple"]} !important;
+    font-weight: 700 !important;
+}}
+
+/* Tabs con acento lima al estar activas */
+.stTabs [aria-selected="true"] {{
+    color: {BRAND["purple"]} !important;
+    border-bottom-color: {BRAND["lemon_dark"]} !important;
+}}
+.stTabs [data-baseweb="tab-highlight"] {{
+    background-color: {BRAND["lemon"]} !important;
+}}
+
+/* Contenedores, expanders y dataframes con esquinas redondeadas */
+[data-testid="stExpander"], .stDataFrame, [data-testid="stDataFrame"] {{
+    border-radius: 16px !important;
+    overflow: hidden;
+}}
+
+/* Radio de navegación del sidebar como "botones" */
+[data-testid="stSidebar"] .stRadio > div {{
+    gap: 8px;
+}}
+[data-testid="stSidebar"] .stRadio label {{
+    background-color: {BRAND["white"]};
+    border-radius: 12px;
+    padding: 8px 12px;
+    border: 1px solid {BRAND["purple_light"]};
+}}
+</style>
+""", unsafe_allow_html=True)
+
 # ── Secrets ──────────────────────────────────────────────────────────────────
 def get_secret(key):
     try:
@@ -1316,7 +1418,10 @@ else:  # 📈 Web Analytics
     with g1:
         st.subheader("Sesiones por día")
         if not ga_timeseries.empty:
-            fig = px.line(ga_timeseries, x="Fecha", y=["Sesiones", "Usuarios"], markers=True)
+            fig = px.line(
+                ga_timeseries, x="Fecha", y=["Sesiones", "Usuarios"], markers=True,
+                color_discrete_sequence=[BRAND["purple"], BRAND["lemon_dark"]],
+            )
             fig.update_layout(height=380, margin=dict(l=0, r=0, t=0, b=0), legend_title="")
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -1329,7 +1434,7 @@ else:  # 📈 Web Analytics
             fig = px.bar(
                 channels_sorted,
                 x="Sesiones", y="Canal", orientation="h",
-                color="Conversiones", color_continuous_scale="Blues",
+                color="Conversiones", color_continuous_scale=PURPLE_SCALE,
                 text="Sesiones",
             )
             fig.update_traces(texttemplate="%{text:.0f}", textposition="outside", cliponaxis=False)
