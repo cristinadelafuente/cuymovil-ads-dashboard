@@ -791,7 +791,7 @@ def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: 
 # ══════════════════════════════════════════════════════════════════════════════
 # ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
 # ══════════════════════════════════════════════════════════════════════════════
-def generate_full_analysis(meta_df, ga_summary, ga_channels) -> str:
+def generate_full_analysis(meta_df, ga_summary, ga_channels, ga_top_pages=None) -> str:
     """Genera un análisis narrativo combinando Meta Ads y Web Analytics (basado en reglas, sin costo de API)."""
     lines = []
 
@@ -826,23 +826,43 @@ def generate_full_analysis(meta_df, ga_summary, ga_channels) -> str:
     if ga_summary:
         lines.append(
             f"**Web Analytics:** tu sitio recibió **{ga_summary['sessions']:,.0f} sesiones** de "
-            f"**{ga_summary['users']:,.0f} usuarios**, con tasa de rebote de **{ga_summary['bounce_rate']:.1f}%** "
-            f"y {ga_summary['conversions']:,.0f} conversiones."
+            f"**{ga_summary['users']:,.0f} usuarios**, permaneciendo en promedio **{ga_summary['avg_duration']:.0f} segundos** "
+            f"por visita, con tasa de rebote de **{ga_summary['bounce_rate']:.1f}%** y {ga_summary['conversions']:,.0f} conversiones."
         )
+        if ga_summary["avg_duration"] < 30:
+            lines.append("⚠️ El tiempo promedio en el sitio es bajo (<30s) — revisa si la landing carga rápido y si el contenido responde a lo que promete el anuncio.")
+        elif ga_summary["avg_duration"] > 90:
+            lines.append("✅ El tiempo promedio en el sitio es alto (>90s), señal de que los visitantes exploran tu contenido.")
         if ga_summary["bounce_rate"] > 60:
             lines.append("⚠️ La tasa de rebote es alta (>60%) — revisa velocidad de carga o relevancia del contenido de aterrizaje.")
         elif ga_summary["bounce_rate"] < 40:
             lines.append("✅ La tasa de rebote es saludable (<40%), señal de que el contenido conecta bien con los visitantes.")
+
         if ga_channels is not None and not ga_channels.empty:
             top_channel = ga_channels.sort_values("Sesiones", ascending=False).iloc[0]
             lines.append(f"El canal que más tráfico aporta es **{top_channel['Canal']}** con {top_channel['Sesiones']:,.0f} sesiones.")
+            total_sesiones = ga_channels["Sesiones"].sum()
+            organico = ga_channels[ga_channels["Canal"].str.contains("Organic", case=False, na=False)]["Sesiones"].sum()
+            pagado   = ga_channels[ga_channels["Canal"].str.contains("Paid", case=False, na=False)]["Sesiones"].sum()
+            directo  = ga_channels[ga_channels["Canal"].str.contains("Direct", case=False, na=False)]["Sesiones"].sum()
+            if total_sesiones:
+                lines.append(
+                    f"Del total de sesiones: **{organico/total_sesiones*100:.0f}% orgánico**, "
+                    f"**{pagado/total_sesiones*100:.0f}% pagado (Meta/Google Ads)**, "
+                    f"**{directo/total_sesiones*100:.0f}% tráfico directo**. "
+                    + ("Dependes mucho de tráfico pagado — conviene invertir en SEO/contenido orgánico para diversificar." if total_sesiones and pagado/total_sesiones > 0.6 else "")
+                )
+
+        if ga_top_pages is not None and not ga_top_pages.empty:
+            top_page = ga_top_pages.sort_values("Vistas", ascending=False).iloc[0]
+            lines.append(f"La página más visitada es **{top_page['Página']}** con {top_page['Vistas']:,.0f} vistas y {top_page['Usuarios']:,.0f} usuarios únicos.")
     else:
         lines.append("**Web Analytics:** no se pudo cargar información (verifica la cuenta de servicio de Google en Secrets).")
 
     lines.append("\n_Nota: Google Ads y Microsoft Clarity aún no están conectados a este dashboard._")
     return "\n\n".join(lines)
 
-def answer_question(question: str, meta_df, ga_summary, ga_channels) -> str:
+def answer_question(question: str, meta_df, ga_summary, ga_channels, ga_top_pages=None) -> str:
     """Responde preguntas en lenguaje natural sobre las métricas cargadas (basado en reglas, sin costo de API)."""
     q = question.lower()
     active = meta_df[meta_df["Estado"] == "ACTIVE"] if meta_df is not None and not meta_df.empty else pd.DataFrame()
@@ -909,15 +929,38 @@ def answer_question(question: str, meta_df, ga_summary, ga_channels) -> str:
             return f"Se registraron **{ga_summary['conversions']:,.0f} conversiones** en el período."
         return "No tengo datos de Google Analytics cargados."
 
-    if any(k in q for k in ["canal", "channel", "de donde viene", "de dónde viene", "trafico", "tráfico"]):
+    if any(k in q for k in ["organico", "orgánico", "pagado", "de donde viene", "de dónde viene", "canal", "channel", "trafico", "tráfico"]):
         if ga_channels is not None and not ga_channels.empty:
+            total_sesiones = ga_channels["Sesiones"].sum()
+            organico = ga_channels[ga_channels["Canal"].str.contains("Organic", case=False, na=False)]["Sesiones"].sum()
+            pagado   = ga_channels[ga_channels["Canal"].str.contains("Paid", case=False, na=False)]["Sesiones"].sum()
+            directo  = ga_channels[ga_channels["Canal"].str.contains("Direct", case=False, na=False)]["Sesiones"].sum()
             top3 = ga_channels.sort_values("Sesiones", ascending=False).head(3)
             detalle = "; ".join(f"{r['Canal']}: {r['Sesiones']:,.0f} sesiones" for _, r in top3.iterrows())
-            return f"Tus principales canales de tráfico son: {detalle}."
+            resumen_pct = ""
+            if total_sesiones:
+                resumen_pct = (f" En términos generales: {organico/total_sesiones*100:.0f}% orgánico, "
+                               f"{pagado/total_sesiones*100:.0f}% pagado, {directo/total_sesiones*100:.0f}% directo.")
+            return f"Tus principales canales de tráfico son: {detalle}.{resumen_pct}"
         return "No tengo datos de canales de Google Analytics cargados."
 
+    if any(k in q for k in ["pagina", "página", "mas visitada", "más visitada", "url"]):
+        if ga_top_pages is not None and not ga_top_pages.empty:
+            top_page = ga_top_pages.sort_values("Vistas", ascending=False).iloc[0]
+            return (f"Tu página más visitada es **{top_page['Página']}** con {top_page['Vistas']:,.0f} vistas "
+                    f"y {top_page['Usuarios']:,.0f} usuarios únicos en el período.")
+        return "No tengo datos de páginas de Google Analytics cargados."
+
+    if any(k in q for k in ["tiempo en", "duracion", "duración", "segundos", "cuanto tiempo", "cuánto tiempo"]):
+        if ga_summary:
+            calif = "bajo — revisa velocidad de carga o relevancia del contenido" if ga_summary["avg_duration"] < 30 else \
+                    "alto, buena señal de interés" if ga_summary["avg_duration"] > 90 else "normal"
+            return f"Los visitantes pasan en promedio **{ga_summary['avg_duration']:.0f} segundos** en tu sitio, lo cual es {calif}."
+        return "No tengo datos de Google Analytics cargados."
+
     return ("No logré identificar a qué dato te refieres. Intenta preguntar sobre: CTR, gasto, sesiones, "
-            "usuarios, rebote, conversiones, canales, frecuencia, o el nombre de una campaña específica.")
+            "usuarios, rebote, conversiones, canales (orgánico/pagado), página más visitada, tiempo en el sitio, "
+            "frecuencia, o el nombre de una campaña específica.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
@@ -1021,9 +1064,10 @@ if nav_section == "📋 Resumen":
     st.header("📋 Resumen General")
     st.caption("Vista unificada de todas las plataformas conectadas a este dashboard.")
 
-    meta_df_r    = None
-    ga_summary_r = None
+    meta_df_r     = None
+    ga_summary_r  = None
     ga_channels_r = None
+    ga_top_pages_r = None
 
     if ACCESS_TOKEN:
         try:
@@ -1040,8 +1084,9 @@ if nav_section == "📋 Resumen":
         try:
             r_start, r_end = get_ga_date_range(resumen_date_preset, resumen_since_str, resumen_until_str)
             with st.spinner("Cargando datos de Google Analytics..."):
-                ga_summary_r  = fetch_ga_summary(GA_PROPERTY_ID, r_start, r_end)
-                ga_channels_r = fetch_ga_channels(GA_PROPERTY_ID, r_start, r_end)
+                ga_summary_r   = fetch_ga_summary(GA_PROPERTY_ID, r_start, r_end)
+                ga_channels_r  = fetch_ga_channels(GA_PROPERTY_ID, r_start, r_end)
+                ga_top_pages_r = fetch_ga_top_pages(GA_PROPERTY_ID, r_start, r_end, limit=5)
         except Exception as e:
             st.warning(f"No se pudo cargar Google Analytics: {e}")
     else:
@@ -1052,7 +1097,7 @@ if nav_section == "📋 Resumen":
     # KPIs combinados de todas las plataformas
     st.subheader("Métricas combinadas")
     active_meta_r = meta_df_r[meta_df_r["Estado"] == "ACTIVE"] if meta_df_r is not None and not meta_df_r.empty else pd.DataFrame()
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     k1.metric("💰 Gasto Meta Ads", f"${active_meta_r['Gasto'].sum():,.2f}" if not active_meta_r.empty else "—")
     if not active_meta_r.empty and active_meta_r["Impresiones"].sum():
         ctr_r = active_meta_r["Clics"].sum() / active_meta_r["Impresiones"].sum() * 100
@@ -1061,22 +1106,61 @@ if nav_section == "📋 Resumen":
         k2.metric("📊 CTR Meta Ads", "—")
     k3.metric("👥 Sesiones Web", f"{ga_summary_r['sessions']:,.0f}" if ga_summary_r else "—")
     k4.metric("🎯 Conversiones Web", f"{ga_summary_r['conversions']:,.0f}" if ga_summary_r else "—")
+    k5.metric("⏱️ Tiempo en sitio", f"{ga_summary_r['avg_duration']:.0f} s" if ga_summary_r else "—")
+    k6.metric("↩️ Tasa de rebote", f"{ga_summary_r['bounce_rate']:.1f}%" if ga_summary_r else "—")
+
+    st.divider()
+
+    # Comportamiento en la web: de dónde vienen y qué visitan
+    st.subheader("🌐 Comportamiento en la web")
+    wc1, wc2 = st.columns(2)
+    with wc1:
+        st.markdown("**¿De dónde viene el tráfico?**")
+        if ga_channels_r is not None and not ga_channels_r.empty:
+            channels_r_sorted = ga_channels_r.sort_values("Sesiones")
+            total_sesiones_r = ga_channels_r["Sesiones"].sum()
+            max_sesiones_r = channels_r_sorted["Sesiones"].max()
+            fig = px.bar(
+                channels_r_sorted, x="Sesiones", y="Canal", orientation="h",
+                color="Conversiones", color_continuous_scale=PURPLE_SCALE, text="Sesiones",
+            )
+            fig.update_traces(texttemplate="%{text:.0f}", textposition="outside", cliponaxis=False)
+            fig.update_layout(
+                height=320, margin=dict(l=0, r=60, t=0, b=0), yaxis_title="",
+                xaxis=dict(range=[0, max_sesiones_r * 1.18]), coloraxis_showscale=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            organico = ga_channels_r[ga_channels_r["Canal"].str.contains("Organic", case=False, na=False)]["Sesiones"].sum()
+            pagado = ga_channels_r[ga_channels_r["Canal"].str.contains("Paid", case=False, na=False)]["Sesiones"].sum()
+            if total_sesiones_r:
+                st.caption(f"Orgánico: {organico/total_sesiones_r*100:.0f}% · Pagado: {pagado/total_sesiones_r*100:.0f}% del total de sesiones.")
+        else:
+            st.info("Sin datos de canales para este período.")
+    with wc2:
+        st.markdown("**Páginas más visitadas**")
+        if ga_top_pages_r is not None and not ga_top_pages_r.empty:
+            st.dataframe(
+                ga_top_pages_r.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
+                use_container_width=True, hide_index=True, height=320,
+            )
+        else:
+            st.info("Sin datos de páginas para este período.")
 
     st.divider()
 
     # Análisis narrativo automático
     st.subheader("🧠 Análisis completo")
-    st.markdown(generate_full_analysis(meta_df_r, ga_summary_r, ga_channels_r))
+    st.markdown(generate_full_analysis(meta_df_r, ga_summary_r, ga_channels_r, ga_top_pages_r))
 
     st.divider()
 
     # Campo libre de preguntas
     st.subheader("💬 Pregúntale a tus datos")
-    st.caption("Escribe una pregunta sobre tus métricas, por ejemplo: '¿cómo va mi CTR?', '¿cuántas sesiones tuve?', '¿cuál es mi mejor campaña?'.")
-    user_question = st.text_input("Tu pregunta", key="resumen_question", placeholder="Ej: ¿Cuál es mi tasa de rebote?")
+    st.caption("Escribe una pregunta sobre tus métricas, por ejemplo: '¿cuál es mi página más visitada?', '¿de dónde viene mi tráfico?', '¿cuánto tiempo pasan en mi web?'.")
+    user_question = st.text_input("Tu pregunta", key="resumen_question", placeholder="Ej: ¿Cuál es mi página más visitada?")
     if st.button("Preguntar", key="btn_resumen_question", type="primary"):
         if user_question.strip():
-            st.info(answer_question(user_question, meta_df_r, ga_summary_r, ga_channels_r))
+            st.info(answer_question(user_question, meta_df_r, ga_summary_r, ga_channels_r, ga_top_pages_r))
         else:
             st.warning("Escribe una pregunta primero.")
 
