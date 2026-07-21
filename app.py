@@ -2017,13 +2017,25 @@ else:  # 🖱️ Clarity
                 cols.append(c)
         return cols
 
-    # Detecta si hay desglose por dispositivo en la respuesta, para armar el filtro Desktop/Mobile
+    def _classify_domain(url) -> str:
+        u = str(url).lower()
+        if "cuy.pe" in u:
+            return "cuy.pe"
+        if "secure.guinea.pe" in u:
+            return "secure.guinea.pe"
+        return "Otro"
+
+    # Detecta si hay desglose por dispositivo y/o URL en la respuesta, para armar los filtros
     device_values = set()
+    domain_available = False
     for block in clarity_data:
         df_tmp = pd.DataFrame(block.get("information", []))
-        col = _find_col_name(df_tmp, "Device")
-        if col:
-            device_values.update(df_tmp[col].dropna().astype(str).unique().tolist())
+        dcol = _find_col_name(df_tmp, "Device")
+        if dcol:
+            device_values.update(df_tmp[dcol].dropna().astype(str).unique().tolist())
+        ucol = _find_col_name(df_tmp, "URL", "Url", "PageUrl", "Page")
+        if ucol:
+            domain_available = True
 
     # KPIs generales de tráfico
     st.subheader("Resumen de tráfico")
@@ -2038,7 +2050,7 @@ else:  # 🖱️ Clarity
 
     st.divider()
 
-    # Filtro interactivo de dispositivo (Desktop / Mobile / Tablet / Todos)
+    # Filtros interactivos de dispositivo y dominio
     if device_values:
         chosen_device = st.radio(
             "📱 Ver interacciones de:", ["Todos"] + sorted(device_values),
@@ -2048,16 +2060,26 @@ else:  # 🖱️ Clarity
         chosen_device = "Todos"
         st.caption("💡 Elige 'Dispositivo' en el filtro 'Desglosar por' del panel izquierdo para poder comparar Desktop vs Mobile aquí.")
 
+    if domain_available:
+        chosen_domain = st.radio(
+            "🌐 Ver dominio:", ["Todos", "cuy.pe", "secure.guinea.pe", "Otro"],
+            horizontal=True, key="clarity_domain_filter",
+        )
+    else:
+        chosen_domain = "Todos"
+        st.caption("💡 Elige 'URL' en alguno de los desgloses del panel izquierdo para poder separar cuy.pe vs secure.guinea.pe aquí.")
+
     st.divider()
 
     # Todas las métricas, mostradas como gráficos interactivos (hover = detalle de interacciones)
     st.subheader("📊 Métricas interactivas")
     st.caption(f"Métricas recibidas en esta respuesta: {', '.join(metric_names_found) if metric_names_found else '(ninguna)'}")
 
-    for block in clarity_data:
+    for i, block in enumerate(clarity_data):
         metric_name = str(block.get("metricName", "(sin nombre)"))
         df = pd.DataFrame(block.get("information", []))
         label = CLARITY_METRIC_LABELS.get(metric_name, f"📌 {metric_name}")
+        chart_key = f"clarity_chart_{i}_{metric_name}".replace(" ", "_")
         st.markdown(f"**{label}**")
 
         if df.empty:
@@ -2069,11 +2091,15 @@ else:  # 🖱️ Clarity
         if device_col and chosen_device != "Todos":
             df = df[df[device_col].astype(str) == chosen_device]
 
+        # Filtra por dominio (cuy.pe / secure.guinea.pe), si esta métrica trae columna de URL
+        url_col = _find_col_name(df, "URL", "Url", "PageUrl", "Page")
+        if url_col and chosen_domain != "Todos":
+            df = df[df[url_col].apply(_classify_domain) == chosen_domain]
+
         if df.empty:
-            st.caption(f"Sin datos para **{chosen_device}** en esta métrica.")
+            st.caption(f"Sin datos para **{chosen_device}** / **{chosen_domain}** en esta métrica.")
             continue
 
-        url_col = _find_col_name(df, "URL", "Url", "PageUrl", "Page")
         dim_col = url_col or device_col or (df.columns[0] if len(df.columns) else None)
         num_cols = _numeric_cols(df, exclude={dim_col} if dim_col else set())
 
@@ -2093,10 +2119,10 @@ else:  # 🖱️ Clarity
                 height=max(280, 30 * len(plot_df)), margin=dict(l=0, r=20, t=10, b=0),
                 yaxis_title="", xaxis_title=value_col, coloraxis_showscale=False,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=chart_key)
             st.caption("Pasa el cursor sobre cada barra para ver el detalle completo de esa fila.")
 
-        with st.expander(f"Ver tabla completa — {label}"):
+        with st.expander(f"Ver tabla completa — {label} #{i}"):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.caption("Nota: los nombres de columnas provienen tal cual de la API de Clarity — cada métrica puede traer campos distintos.")
