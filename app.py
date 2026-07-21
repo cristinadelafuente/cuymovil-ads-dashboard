@@ -1981,6 +1981,8 @@ else:  # 🖱️ Clarity
         st.info("Sin datos disponibles para este período.")
         st.stop()
 
+    metric_names_found = [str(block.get("metricName", "(sin nombre)")) for block in clarity_data]
+
     # KPIs generales de tráfico
     st.subheader("Resumen de tráfico")
     traffic_summary = clarity_traffic_summary(clarity_data)
@@ -1990,34 +1992,25 @@ else:  # 🖱️ Clarity
         c2.metric("🤖 Sesiones de bots", f"{traffic_summary['bot_sessions']:,.0f}")
         c3.metric("🙋 Usuarios únicos", f"{traffic_summary['users']:,.0f}")
     else:
-        st.info("Sin métricas de tráfico para este período.")
+        st.info("Sin métricas de tráfico para este período (el bloque 'Traffic' no vino en la respuesta).")
 
     st.divider()
 
-    # Páginas populares
-    st.subheader("📄 Páginas populares")
-    pages_df = clarity_metric_df(clarity_data, "Popular Pages")
-    if not pages_df.empty:
-        st.dataframe(pages_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Sin datos de páginas populares para este período/desglose.")
-
-    st.divider()
-
-    # Señales de frustración e interacción
-    st.subheader("😤 Señales de frustración e interacción")
-    frustration_metrics = [
-        "Engagement Time", "Scroll Depth", "Dead Click Count", "Rage Click Count",
-        "Quickback Click", "Excessive Scroll", "Script Error Count", "Error Click Count",
-    ]
-    any_data = False
-    for metric in frustration_metrics:
-        df = clarity_metric_df(clarity_data, metric)
+    # Todas las métricas que Clarity devolvió, mostradas dinámicamente (sin depender de nombres fijos)
+    st.subheader("📊 Todas las métricas de Clarity")
+    st.caption(f"Métricas recibidas en esta respuesta: {', '.join(metric_names_found) if metric_names_found else '(ninguna)'}")
+    for block in clarity_data:
+        metric_name = str(block.get("metricName", "(sin nombre)"))
+        info = block.get("information", [])
+        df = pd.DataFrame(info)
+        label = CLARITY_METRIC_LABELS.get(metric_name, f"📌 {metric_name}")
+        st.markdown(f"**{label}**")
         if not df.empty:
-            any_data = True
-            st.markdown(f"**{CLARITY_METRIC_LABELS.get(metric, metric)}**")
             st.dataframe(df, use_container_width=True, hide_index=True)
-    if not any_data:
-        st.info("Sin señales de frustración registradas para este período/desglose.")
+        else:
+            st.caption("Sin filas para esta métrica en el período/desglose seleccionado.")
 
     st.caption("Nota: los nombres de columnas provienen tal cual de la API de Clarity — cada métrica puede traer campos distintos.")
+
+    with st.expander("🔧 Ver respuesta cruda de la API (debug)"):
+        st.json(clarity_data)
