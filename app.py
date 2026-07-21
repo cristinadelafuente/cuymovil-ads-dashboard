@@ -847,8 +847,10 @@ CLARITY_METRIC_LABELS = {
     "Error Click Count": "🚫 Clics con error",
 }
 
+CLARITY_PROJECT_URL = get_secret("CLARITY_PROJECT_URL") or "https://clarity.microsoft.com/projects"
+
 @st.cache_data(ttl=14400, show_spinner=False)  # 4h de caché — Clarity limita a 10 llamadas/día por proyecto
-def fetch_clarity_insights(num_days: int = 3, dimension1: str = None) -> list:
+def fetch_clarity_insights(num_days: int = 3, dimension1: str = None, dimension2: str = None) -> list:
     """Trae los datos crudos de la Clarity Data Export API."""
     if not CLARITY_API_TOKEN:
         return []
@@ -856,6 +858,8 @@ def fetch_clarity_insights(num_days: int = 3, dimension1: str = None) -> list:
     params = {"numOfDays": num_days}
     if dimension1:
         params["dimension1"] = dimension1
+    if dimension2:
+        params["dimension2"] = dimension2
     headers = {
         "Authorization": f"Bearer {CLARITY_API_TOKEN}",
         "Content-Type": "application/json",
@@ -1170,8 +1174,10 @@ with st.sidebar:
         st.subheader("Filtros — Clarity")
         clarity_days_label = st.selectbox("Días hacia atrás", ["Último día (1)", "Últimos 2 días", "Últimos 3 días"], index=2, key="clarity_days_label")
         clarity_num_days = {"Último día (1)": 1, "Últimos 2 días": 2, "Últimos 3 días": 3}[clarity_days_label]
-        clarity_dim_label = st.selectbox("Desglosar por", list(CLARITY_DIMENSIONS.keys()), key="clarity_dim_label")
-        clarity_dimension = CLARITY_DIMENSIONS[clarity_dim_label]
+        clarity_dim1_label = st.selectbox("Desglosar por", list(CLARITY_DIMENSIONS.keys()), index=list(CLARITY_DIMENSIONS.keys()).index("Dispositivo"), key="clarity_dim1_label")
+        clarity_dimension1 = CLARITY_DIMENSIONS[clarity_dim1_label]
+        clarity_dim2_label = st.selectbox("Y también por", list(CLARITY_DIMENSIONS.keys()), index=list(CLARITY_DIMENSIONS.keys()).index("URL"), key="clarity_dim2_label")
+        clarity_dimension2 = CLARITY_DIMENSIONS[clarity_dim2_label]
         st.caption("⚠️ La API de Clarity permite solo **10 llamadas al día** por proyecto. Los datos se cachean 4 horas — evita presionar 'Actualizar' repetidamente.")
         if st.button("🔄 Actualizar datos de Clarity", use_container_width=True, key="refresh_clarity"):
             fetch_clarity_insights.clear()
@@ -1962,17 +1968,28 @@ elif nav_section == "📈 Web Analytics":
 
 else:  # 🖱️ Clarity
     st.header("🖱️ Microsoft Clarity")
-    st.caption("Mapas de calor, grabaciones de sesión y señales de frustración (rage clicks, dead clicks, etc).")
+    st.caption("Señales de comportamiento e interacción por página y por dispositivo (rage clicks, dead clicks, etc).")
 
     if not CLARITY_API_TOKEN:
         st.error("Falta configurar el token de Clarity. Agrega `CLARITY_API_TOKEN` en Streamlit Cloud → Settings → Secrets.")
         st.stop()
 
-    st.caption(f"Ventana: **{clarity_days_label}** · Desglose: **{clarity_dim_label}** · Límite: 10 llamadas/día por proyecto.")
+    hc1, hc2 = st.columns([3, 1])
+    with hc1:
+        st.info(
+            "La API de Clarity no expone el mapa de calor visual (posición exacta de clics sobre la página) — "
+            "eso solo vive en el dashboard nativo de Clarity. Aquí abajo tienes gráficos interactivos con los "
+            "números reales (pasa el cursor sobre las barras para ver el detalle), filtrables por dispositivo y página. "
+            "Para el heatmap visual real, usa el botón de la derecha."
+        )
+    with hc2:
+        st.link_button("🔥 Ver heatmap visual en Clarity", CLARITY_PROJECT_URL, use_container_width=True)
+
+    st.caption(f"Ventana: **{clarity_days_label}** · Desglose: **{clarity_dim1_label}** + **{clarity_dim2_label}** · Límite: 10 llamadas/día por proyecto.")
 
     try:
         with st.spinner("Cargando datos de Clarity..."):
-            clarity_data = fetch_clarity_insights(clarity_num_days, clarity_dimension)
+            clarity_data = fetch_clarity_insights(clarity_num_days, clarity_dimension1, clarity_dimension2)
     except Exception as e:
         st.error(f"No se pudo conectar con Clarity: {e}")
         st.stop()
@@ -1982,6 +1999,31 @@ else:  # 🖱️ Clarity
         st.stop()
 
     metric_names_found = [str(block.get("metricName", "(sin nombre)")) for block in clarity_data]
+
+    def _find_col_name(df, *candidates):
+        lower_map = {str(c).lower(): c for c in df.columns}
+        for cand in candidates:
+            if cand.lower() in lower_map:
+                return lower_map[cand.lower()]
+        return None
+
+    def _numeric_cols(df, exclude=()):
+        cols = []
+        for c in df.columns:
+            if c in exclude:
+                continue
+            coerced = pd.to_numeric(df[c], errors="coerce")
+            if coerced.notna().sum() > 0:
+                cols.append(c)
+        return cols
+
+    # Detecta si hay desglose por dispositivo en la respuesta, para armar el filtro Desktop/Mobile
+    device_values = set()
+    for block in clarity_data:
+        df_tmp = pd.DataFrame(block.get("information", []))
+        col = _find_col_name(df_tmp, "Device")
+        if col:
+            device_values.update(df_tmp[col].dropna().astype(str).unique().tolist())
 
     # KPIs generales de tráfico
     st.subheader("Resumen de tráfico")
@@ -1996,19 +2038,66 @@ else:  # 🖱️ Clarity
 
     st.divider()
 
-    # Todas las métricas que Clarity devolvió, mostradas dinámicamente (sin depender de nombres fijos)
-    st.subheader("📊 Todas las métricas de Clarity")
+    # Filtro interactivo de dispositivo (Desktop / Mobile / Tablet / Todos)
+    if device_values:
+        chosen_device = st.radio(
+            "📱 Ver interacciones de:", ["Todos"] + sorted(device_values),
+            horizontal=True, key="clarity_device_filter",
+        )
+    else:
+        chosen_device = "Todos"
+        st.caption("💡 Elige 'Dispositivo' en el filtro 'Desglosar por' del panel izquierdo para poder comparar Desktop vs Mobile aquí.")
+
+    st.divider()
+
+    # Todas las métricas, mostradas como gráficos interactivos (hover = detalle de interacciones)
+    st.subheader("📊 Métricas interactivas")
     st.caption(f"Métricas recibidas en esta respuesta: {', '.join(metric_names_found) if metric_names_found else '(ninguna)'}")
+
     for block in clarity_data:
         metric_name = str(block.get("metricName", "(sin nombre)"))
-        info = block.get("information", [])
-        df = pd.DataFrame(info)
+        df = pd.DataFrame(block.get("information", []))
         label = CLARITY_METRIC_LABELS.get(metric_name, f"📌 {metric_name}")
         st.markdown(f"**{label}**")
-        if not df.empty:
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
+
+        if df.empty:
             st.caption("Sin filas para esta métrica en el período/desglose seleccionado.")
+            continue
+
+        # Filtra por el dispositivo elegido arriba, si esta métrica trae esa columna
+        device_col = _find_col_name(df, "Device")
+        if device_col and chosen_device != "Todos":
+            df = df[df[device_col].astype(str) == chosen_device]
+
+        if df.empty:
+            st.caption(f"Sin datos para **{chosen_device}** en esta métrica.")
+            continue
+
+        url_col = _find_col_name(df, "URL", "Url", "PageUrl", "Page")
+        dim_col = url_col or device_col or (df.columns[0] if len(df.columns) else None)
+        num_cols = _numeric_cols(df, exclude={dim_col} if dim_col else set())
+
+        if dim_col and num_cols:
+            value_col = num_cols[0]
+            plot_df = df.copy()
+            plot_df[value_col] = pd.to_numeric(plot_df[value_col], errors="coerce").fillna(0)
+            plot_df[dim_col] = plot_df[dim_col].astype(str)
+            plot_df = plot_df.sort_values(value_col, ascending=True).tail(15)
+            hover_cols = [c for c in df.columns if c != dim_col]
+            fig = px.bar(
+                plot_df, x=value_col, y=dim_col, orientation="h",
+                color=value_col, color_continuous_scale=PURPLE_SCALE,
+                hover_data=hover_cols,
+            )
+            fig.update_layout(
+                height=max(280, 30 * len(plot_df)), margin=dict(l=0, r=20, t=10, b=0),
+                yaxis_title="", xaxis_title=value_col, coloraxis_showscale=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("Pasa el cursor sobre cada barra para ver el detalle completo de esa fila.")
+
+        with st.expander(f"Ver tabla completa — {label}"):
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.caption("Nota: los nombres de columnas provienen tal cual de la API de Clarity — cada métrica puede traer campos distintos.")
 
