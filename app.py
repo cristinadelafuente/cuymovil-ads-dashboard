@@ -142,6 +142,12 @@ APP_SECRET   = get_secret("APP_SECRET")
 PAGE_ID      = get_secret("PAGE_ID")
 GA_PROPERTY_ID = get_secret("GA_PROPERTY_ID") or "255486373"
 CLARITY_API_TOKEN = get_secret("CLARITY_API_TOKEN")
+GOOGLE_ADS_CLIENT_ID = get_secret("GOOGLE_ADS_CLIENT_ID")
+GOOGLE_ADS_CLIENT_SECRET = get_secret("GOOGLE_ADS_CLIENT_SECRET")
+GOOGLE_ADS_REFRESH_TOKEN = get_secret("GOOGLE_ADS_REFRESH_TOKEN")
+GOOGLE_ADS_DEVELOPER_TOKEN = get_secret("GOOGLE_ADS_DEVELOPER_TOKEN")
+GOOGLE_ADS_LOGIN_CUSTOMER_ID = get_secret("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+GOOGLE_ADS_CUSTOMER_ID = get_secret("GOOGLE_ADS_CUSTOMER_ID") or "9778403348"
 
 # ── Constantes ───────────────────────────────────────────────────────────────
 ACCOUNTS = {
@@ -897,6 +903,64 @@ def clarity_traffic_summary(clarity_data: list) -> dict:
     return {"sessions": sessions, "bot_sessions": bots, "users": users}
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE ADS — Google Ads API (google-ads client library)
+# ══════════════════════════════════════════════════════════════════════════════
+GOOGLE_ADS_READY = bool(
+    GOOGLE_ADS_CLIENT_ID and GOOGLE_ADS_CLIENT_SECRET and GOOGLE_ADS_REFRESH_TOKEN and GOOGLE_ADS_DEVELOPER_TOKEN
+)
+
+def init_google_ads_client():
+    from google.ads.googleads.client import GoogleAdsClient
+    config = {
+        "client_id": GOOGLE_ADS_CLIENT_ID,
+        "client_secret": GOOGLE_ADS_CLIENT_SECRET,
+        "refresh_token": GOOGLE_ADS_REFRESH_TOKEN,
+        "developer_token": GOOGLE_ADS_DEVELOPER_TOKEN,
+        "use_proto_plus": True,
+    }
+    if GOOGLE_ADS_LOGIN_CUSTOMER_ID:
+        config["login_customer_id"] = str(GOOGLE_ADS_LOGIN_CUSTOMER_ID).replace("-", "")
+    return GoogleAdsClient.load_from_dict(config)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_google_ads_campaigns(customer_id: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Trae métricas de campañas de Google Ads agregadas en el rango de fechas dado, vía GAQL."""
+    client = init_google_ads_client()
+    ga_service = client.get_service("GoogleAdsService")
+    customer_id_clean = str(customer_id).replace("-", "")
+    query = f"""
+        SELECT
+            campaign.id,
+            campaign.name,
+            campaign.status,
+            campaign.advertising_channel_type,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.ctr,
+            metrics.average_cpc
+        FROM campaign
+        WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+        ORDER BY metrics.cost_micros DESC
+    """
+    response = ga_service.search(customer_id=customer_id_clean, query=query)
+    rows = []
+    for row in response:
+        rows.append({
+            "Campaña": row.campaign.name,
+            "Estado": row.campaign.status.name,
+            "Tipo": row.campaign.advertising_channel_type.name,
+            "Impresiones": row.metrics.impressions,
+            "Clics": row.metrics.clicks,
+            "Gasto": row.metrics.cost_micros / 1_000_000,
+            "Conversiones": row.metrics.conversions,
+            "CTR": row.metrics.ctr * 100,
+            "CPC": row.metrics.average_cpc / 1_000_000 if row.metrics.average_cpc else 0,
+        })
+    return pd.DataFrame(rows)
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
 # ══════════════════════════════════════════════════════════════════════════════
 def generate_full_analysis(meta_df, ga_summary, ga_channels, ga_top_pages=None) -> str:
@@ -1083,7 +1147,7 @@ with st.sidebar:
     st.header("🗂️ Accesos")
     nav_section = st.radio(
         "Selecciona una plataforma",
-        ["📋 Resumen", "📊 Meta Ads", "📈 Web Analytics", "🖱️ Clarity"],
+        ["📋 Resumen", "📊 Meta Ads", "🔍 Google Ads", "📈 Web Analytics", "🖱️ Clarity"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -1142,6 +1206,31 @@ with st.sidebar:
             st.cache_data.clear()
             st.rerun()
         st.caption("Los cambios ejecutados son inmediatos y reales.")
+
+    elif nav_section == "🔍 Google Ads":
+        st.subheader("Filtros — Google Ads")
+        gads_date_label  = st.selectbox("Período", list(DATE_OPTIONS.keys()), index=2, key="gads_date_label")
+        gads_date_preset = DATE_OPTIONS[gads_date_label]
+
+        gads_since_str, gads_until_str = "", ""
+        if gads_date_preset == "custom":
+            hoy_peru_gads = datetime.now(PERU_TZ).date()
+            gads_custom_range = st.date_input(
+                "Rango de fechas",
+                value=(hoy_peru_gads.replace(day=1), hoy_peru_gads),
+                max_value=hoy_peru_gads,
+                key="gads_custom_range",
+            )
+            if isinstance(gads_custom_range, tuple) and len(gads_custom_range) == 2:
+                gads_since_str = gads_custom_range[0].strftime("%Y-%m-%d")
+                gads_until_str = gads_custom_range[1].strftime("%Y-%m-%d")
+            else:
+                st.warning("Selecciona una fecha de inicio y una de fin.")
+
+        st.caption(f"Cuenta: `{GOOGLE_ADS_CUSTOMER_ID}`")
+        if st.button("🔄 Actualizar datos", use_container_width=True, key="refresh_gads"):
+            st.cache_data.clear()
+            st.rerun()
 
     elif nav_section == "📈 Web Analytics":
         st.subheader("Filtros — Web Analytics")
@@ -1834,6 +1923,90 @@ elif nav_section == "📊 Meta Ads":
                     except Exception as e:
                         st.error(f"Error al crear el anuncio: {e}")
                         st.caption("Abre los logs en 'Manage app' para ver el detalle.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE ADS
+# ══════════════════════════════════════════════════════════════════════════════
+elif nav_section == "🔍 Google Ads":
+    st.header("🔍 Google Ads")
+    st.caption("Métricas de campañas de Google Ads del período seleccionado.")
+
+    if not GOOGLE_ADS_READY:
+        st.error(
+            "Falta configurar Google Ads. Agrega `GOOGLE_ADS_CLIENT_ID`, `GOOGLE_ADS_CLIENT_SECRET`, "
+            "`GOOGLE_ADS_REFRESH_TOKEN` y `GOOGLE_ADS_DEVELOPER_TOKEN` en Streamlit Cloud → Settings → Secrets."
+        )
+        st.stop()
+
+    if gads_date_preset == "custom" and not (gads_since_str and gads_until_str):
+        st.info("Selecciona un rango de fechas válido en el panel izquierdo para continuar.")
+        st.stop()
+
+    gads_start, gads_end = get_ga_date_range(gads_date_preset, gads_since_str, gads_until_str)
+    st.caption(f"Período: **{gads_start}** a **{gads_end}** · Cuenta: `{GOOGLE_ADS_CUSTOMER_ID}`")
+
+    try:
+        with st.spinner("Cargando datos de Google Ads..."):
+            gads_df = fetch_google_ads_campaigns(GOOGLE_ADS_CUSTOMER_ID, gads_start, gads_end)
+    except Exception as e:
+        st.error(f"No se pudo conectar con Google Ads: {e}")
+        st.caption(
+            "Verifica que el Customer ID sea correcto, que la cuenta que autorizó el refresh token tenga acceso "
+            "a esa cuenta de Google Ads, y que el Developer Token esté aprobado para el nivel de acceso necesario."
+        )
+        st.stop()
+
+    if gads_df.empty:
+        st.info("No hay datos disponibles para este período.")
+        st.stop()
+
+    st.subheader("Resumen del período")
+    total_spend       = gads_df["Gasto"].sum()
+    total_impressions = gads_df["Impresiones"].sum()
+    total_clicks      = gads_df["Clics"].sum()
+    total_conversions = gads_df["Conversiones"].sum()
+    avg_ctr           = (total_clicks / total_impressions * 100) if total_impressions else 0
+    avg_cpc           = (total_spend / total_clicks) if total_clicks else 0
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("💰 Gasto", f"${total_spend:,.2f}")
+    k2.metric("👁️ Impresiones", f"{total_impressions:,.0f}")
+    k3.metric("🖱️ Clics", f"{total_clicks:,.0f}")
+    k4.metric("📊 CTR", f"{avg_ctr:.2f}%")
+    k5.metric("💲 CPC", f"${avg_cpc:.3f}")
+    k6.metric("🎯 Conversiones", f"{total_conversions:,.1f}")
+
+    st.divider()
+
+    active_gads_df = gads_df[gads_df["Estado"] == "ENABLED"]
+    chart_df = active_gads_df if not active_gads_df.empty else gads_df
+    if not chart_df.empty:
+        st.subheader("Gasto por campaña")
+        max_gasto_gads = chart_df["Gasto"].max()
+        fig = px.bar(
+            chart_df.sort_values("Gasto"),
+            x="Gasto", y="Campaña", orientation="h",
+            color="CTR", color_continuous_scale="RdYlGn",
+            color_continuous_midpoint=chart_df["CTR"].median(),
+            labels={"Gasto": "Gasto (USD)", "CTR": "CTR%"}, text="Gasto",
+        )
+        fig.update_traces(texttemplate="$%{text:.0f}", textposition="outside", cliponaxis=False)
+        fig.update_layout(
+            height=max(320, 32 * len(chart_df)), margin=dict(l=0, r=60, t=10, b=0), yaxis_title="",
+            xaxis=dict(range=[0, max_gasto_gads * 1.18]), coloraxis_showscale=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    st.subheader("Detalle por campaña")
+    st.dataframe(
+        gads_df.style.format({
+            "Gasto": "${:,.2f}", "Impresiones": "{:,.0f}", "Clics": "{:,.0f}",
+            "CTR": "{:.2f}%", "CPC": "${:.3f}", "Conversiones": "{:,.1f}",
+        }),
+        use_container_width=True, hide_index=True,
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — WEB ANALYTICS (Google Analytics 4)
