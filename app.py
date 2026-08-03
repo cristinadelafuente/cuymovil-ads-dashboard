@@ -1135,6 +1135,261 @@ def answer_question(question: str, meta_df, ga_summary, ga_channels, ga_top_page
             "frecuencia, o el nombre de una campaña específica.")
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PARRILLA DE CONTENIDO — recomendación mensual basada en datos reales (sin costo de API)
+# ══════════════════════════════════════════════════════════════════════════════
+MEDIA_TYPE_ES = {
+    "photo": "Imagen estática", "video": "Video", "link": "Enlace/Link",
+    "album": "Álbum de fotos", "status": "Texto/Status", "share": "Compartido",
+}
+
+AGE_INTEREST_BANDS = [
+    ((13, 17),  ["TikTok", "Instagram Reels", "Videojuegos móviles"]),
+    ((18, 24),  ["Vida universitaria", "TikTok", "Instagram Reels", "Smartphones"]),
+    ((25, 34),  ["Trabajo remoto", "Streaming de video", "Compras en línea", "Instagram"]),
+    ((35, 44),  ["Familia", "Planes postpago", "Negocios pequeños", "Educación de hijos"]),
+    ((45, 120), ["Noticias", "Salud y bienestar", "Planes postpago"]),
+]
+
+CONTENT_PILLARS = [
+    {
+        "nombre": "Promocional",
+        "brief": "Pieza estática o carrusel con oferta/precio destacado en grande. Paleta morada (#5543CE) y lima "
+                 "(#DCFE6D) de marca, logo Cuy visible, headline corto (máx. 6 palabras).",
+    },
+    {
+        "nombre": "Educativo",
+        "brief": "Carrusel de 3–4 slides explicando un beneficio o cómo usar el servicio. Iconografía simple, "
+                 "un mensaje por slide, texto grande legible en mobile.",
+    },
+    {
+        "nombre": "Testimonial / Comunidad",
+        "brief": "Formato Reel corto (15–30s) con persona real o estilo UGC. Subtítulos quemados en el video, "
+                 "tono cercano y auténtico, sin verse como anuncio tradicional.",
+    },
+    {
+        "nombre": "Entretenimiento / Tendencia",
+        "brief": "Reel con audio o formato de tendencia del momento, edición dinámica, texto en pantalla, "
+                 "gancho visual en los primeros 3 segundos.",
+    },
+]
+
+DIAS_ES_ORDER = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_age_gender_breakdown(account_id: str, date_preset: str, since: str = "", until: str = "") -> pd.DataFrame:
+    """Desglose de rendimiento por edad y género a nivel de cuenta — para saber qué audiencia interactúa mejor."""
+    init_api()
+    account = AdAccount(account_id)
+    if date_preset == "custom" and since and until:
+        params = {"time_range": {"since": since, "until": until}, "level": "account", "breakdowns": ["age", "gender"]}
+    else:
+        params = {"date_preset": date_preset, "level": "account", "breakdowns": ["age", "gender"]}
+    try:
+        insights = account.get_insights(fields=INSIGHT_FIELDS, params=params)
+    except Exception:
+        return pd.DataFrame()
+
+    gender_es = {"male": "Hombres", "female": "Mujeres", "unknown": "Sin especificar"}
+    rows = []
+    for r in insights:
+        imp = int(r.get("impressions", 0) or 0)
+        if imp == 0:
+            continue
+        cl = int(r.get("clicks", 0) or 0)
+        sp = float(r.get("spend", 0) or 0)
+        rows.append({
+            "Edad":   r.get("age", "unknown"),
+            "Género": gender_es.get(r.get("gender", ""), r.get("gender", "")),
+            "Gasto": sp, "Impresiones": imp, "Clics": cl,
+            "CTR": (cl / imp * 100) if imp else 0,
+        })
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_organic_posts(page_id: str, access_token: str, limit: int = 25) -> pd.DataFrame:
+    """Publicaciones orgánicas recientes de la página con su interacción (likes, comentarios, compartidos)."""
+    if not page_id or not access_token:
+        return pd.DataFrame()
+    url = f"https://graph.facebook.com/v21.0/{page_id}/posts"
+    params = {
+        "fields": ("message,created_time,permalink_url,attachments{media_type},shares,"
+                   "likes.summary(true).limit(0),comments.summary(true).limit(0)"),
+        "limit": limit,
+        "access_token": access_token,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        data = resp.json().get("data", [])
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for post in data:
+        likes    = post.get("likes", {}).get("summary", {}).get("total_count", 0) or 0
+        comments = post.get("comments", {}).get("summary", {}).get("total_count", 0) or 0
+        shares   = post.get("shares", {}).get("count", 0) or 0
+        att = post.get("attachments", {}).get("data", [])
+        media_type = att[0].get("media_type", "status") if att else "status"
+        created = post.get("created_time", "")
+        dt = None
+        try:
+            dt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%S%z").astimezone(PERU_TZ)
+        except Exception:
+            pass
+        score = likes + comments * 2 + shares * 3
+        rows.append({
+            "Mensaje": (post.get("message") or "(sin texto)")[:160],
+            "Tipo": MEDIA_TYPE_ES.get(media_type, media_type),
+            "Fecha": dt,
+            "Likes": likes, "Comentarios": comments, "Compartidos": shares,
+            "Interacción": score,
+            "Permalink": post.get("permalink_url", ""),
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        dias_map = dict(zip(
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+            DIAS_ES_ORDER,
+        ))
+        df["Día"]  = df["Fecha"].apply(lambda d: dias_map.get(d.strftime("%A"), "") if d is not None else "")
+        df["Hora"] = df["Fecha"].apply(lambda d: d.hour if d is not None else None)
+    return df
+
+def _interests_for_age_label(age_label: str) -> list:
+    try:
+        if "+" in age_label:
+            lo, hi = int(age_label.replace("+", "")), 120
+        else:
+            lo, hi = [int(x) for x in age_label.split("-")]
+        mid = (lo + hi) / 2
+    except Exception:
+        return ["Smartphones", "Telefonía móvil de prepago"]
+    for (band_lo, band_hi), interests in AGE_INTEREST_BANDS:
+        if band_lo <= mid <= band_hi:
+            return interests
+    return ["Smartphones", "Telefonía móvil de prepago"]
+
+def generate_meta_campaign_recos(meta_df_wide: pd.DataFrame, age_gender_df: pd.DataFrame,
+                                  max_campaigns: int = 4, max_daily_budget: float = 4.0) -> list:
+    """Recomienda hasta `max_campaigns` campañas Meta Ads con audiencia y presupuesto sugeridos, según rendimiento real."""
+    objective_rank = []
+    if meta_df_wide is not None and not meta_df_wide.empty and "Objetivo" in meta_df_wide.columns:
+        obj_group = meta_df_wide.groupby("Objetivo").agg(
+            Impresiones=("Impresiones_Total", "sum"), Clics=("Clics_Total", "sum")
+        )
+        obj_group = obj_group[obj_group["Impresiones"] > 0]
+        obj_group["CTR"] = obj_group["Clics"] / obj_group["Impresiones"] * 100
+        objective_rank = obj_group.sort_values("CTR", ascending=False).index.tolist()
+
+    obj_code_to_label = {v: k for k, v in OBJECTIVES.items()}
+    ranked_labels = [obj_code_to_label.get(o, o) for o in objective_rank]
+    fallback_order = ["Ventas / Conversiones", "Tráfico al sitio web", "Interacción / Engagement", "Captación de leads"]
+    objectives_final = []
+    for lbl in ranked_labels + fallback_order:
+        if lbl not in objectives_final:
+            objectives_final.append(lbl)
+    objectives_final = objectives_final[:max_campaigns]
+
+    segments = []
+    if age_gender_df is not None and not age_gender_df.empty:
+        seg_df = age_gender_df[age_gender_df["Impresiones"] >= 200].copy()
+        if seg_df.empty:
+            seg_df = age_gender_df.copy()
+        seg_df = seg_df.sort_values("CTR", ascending=False)
+        for _, row in seg_df.iterrows():
+            segments.append({"Edad": row["Edad"], "Género": row["Género"], "CTR": row["CTR"], "Gasto": row["Gasto"]})
+
+    default_segments = [
+        {"Edad": "18-24", "Género": "Todos", "CTR": None, "Gasto": None},
+        {"Edad": "25-34", "Género": "Todos", "CTR": None, "Gasto": None},
+        {"Edad": "35-44", "Género": "Todos", "CTR": None, "Gasto": None},
+        {"Edad": "45-54", "Género": "Todos", "CTR": None, "Gasto": None},
+    ]
+    while len(segments) < max_campaigns:
+        segments.append(default_segments[len(segments) % len(default_segments)])
+    segments = segments[:max_campaigns]
+
+    budget_tiers = [max_daily_budget, round(max_daily_budget * 0.75, 2),
+                    round(max_daily_budget * 0.6, 2), round(max_daily_budget * 0.5, 2)][:max_campaigns]
+
+    recos = []
+    for i in range(max_campaigns):
+        seg = segments[i]
+        obj_label = objectives_final[i] if i < len(objectives_final) else fallback_order[i % len(fallback_order)]
+        interests = _interests_for_age_label(str(seg["Edad"]))
+        if seg["CTR"] is not None:
+            rationale = (f"Este segmento ({seg['Edad']} años, {seg['Género']}) tuvo un CTR real de "
+                         f"{seg['CTR']:.2f}% en tus campañas — de los que mejor responden a tus anuncios.")
+        else:
+            rationale = ("No hay suficiente historial de este segmento en tus campañas; se sugiere como "
+                         "banda base de telco para probar y generar datos.")
+        if i == 0 and objective_rank:
+            rationale += f" El objetivo '{obj_label}' es el que históricamente mejor CTR ha tenido en tu cuenta."
+        recos.append({
+            "Campaña": f"Campaña {i+1} · {obj_label}",
+            "Objetivo": obj_label,
+            "Edad": seg["Edad"], "Género": seg["Género"],
+            "Intereses sugeridos": ", ".join(interests),
+            "Presupuesto diario": budget_tiers[i],
+            "Justificación": rationale,
+        })
+    return recos
+
+def generate_organic_calendar(organic_df: pd.DataFrame, weeks: int = 4, posts_per_week: int = 3) -> tuple:
+    """Parrilla mensual de contenido orgánico con brief de diseño, según qué formato/día funciona mejor."""
+    best_format = None
+    best_days = []
+    top_posts = pd.DataFrame()
+
+    if organic_df is not None and not organic_df.empty:
+        fmt_perf = organic_df.groupby("Tipo")["Interacción"].mean().sort_values(ascending=False)
+        if not fmt_perf.empty:
+            best_format = fmt_perf.index[0]
+        day_df = organic_df[organic_df["Día"] != ""] if "Día" in organic_df.columns else pd.DataFrame()
+        if not day_df.empty:
+            day_perf = day_df.groupby("Día")["Interacción"].mean().sort_values(ascending=False)
+            best_days = [d for d in day_perf.index if d in DIAS_ES_ORDER][:3]
+        top_posts = organic_df.sort_values("Interacción", ascending=False).head(3)[
+            ["Mensaje", "Tipo", "Interacción", "Permalink"]
+        ]
+        note = (f"Basado en tus últimas {len(organic_df)} publicaciones: el formato con mejor interacción promedio es "
+                f"**{best_format}**" + (f", y los días con mejor respuesta son **{', '.join(best_days)}**." if best_days else "."))
+    else:
+        note = "No se pudo cargar el historial orgánico (verifica PAGE_ID/permisos) — se usa una parrilla estándar de buenas prácticas."
+
+    if not best_days:
+        best_days = ["Martes", "Jueves", "Sábado"]
+    while len(best_days) < posts_per_week:
+        for d in DIAS_ES_ORDER:
+            if d not in best_days:
+                best_days.append(d)
+            if len(best_days) >= posts_per_week:
+                break
+    best_days = best_days[:posts_per_week]
+
+    rows = []
+    for week in range(1, weeks + 1):
+        for i, day in enumerate(best_days):
+            pillar = CONTENT_PILLARS[(week - 1 + i) % len(CONTENT_PILLARS)]
+            if best_format and i == 0:
+                fmt_sugerido = best_format
+            elif pillar["nombre"] in ("Testimonial / Comunidad", "Entretenimiento / Tendencia"):
+                fmt_sugerido = "Video / Reel"
+            else:
+                fmt_sugerido = "Imagen estática / Carrusel"
+            rows.append({
+                "Semana": week,
+                "Día sugerido": day,
+                "Pilar de contenido": pillar["nombre"],
+                "Formato": fmt_sugerido,
+                "Brief para diseño": pillar["brief"],
+                "CTA sugerido": "Más información" if pillar["nombre"] == "Promocional" else
+                                "Conoce más" if pillar["nombre"] == "Educativo" else "Síguenos / Comenta",
+            })
+    calendar_df = pd.DataFrame(rows)
+    return calendar_df, note, top_posts
+
+# ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 col_title, col_time = st.columns([4, 1])
@@ -1420,7 +1675,7 @@ elif nav_section == "📊 Meta Ads":
         st.stop()
 
     # ── Tabs internas de Meta Ads ──────────────────────────────────────────────
-    tab_dash, tab_create = st.tabs(["📊 Dashboard", "➕ Crear Anuncio"])
+    tab_dash, tab_create, tab_grid = st.tabs(["📊 Dashboard", "➕ Crear Anuncio", "🗓️ Parrilla de Contenido"])
 
     # ══════════════════════════════════════════════════════════════════════════════
     # TAB 1 — DASHBOARD
@@ -1923,6 +2178,98 @@ elif nav_section == "📊 Meta Ads":
                     except Exception as e:
                         st.error(f"Error al crear el anuncio: {e}")
                         st.caption("Abre los logs en 'Manage app' para ver el detalle.")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 3 — PARRILLA DE CONTENIDO (recomendación mensual basada en datos reales)
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab_grid:
+        st.header("🗓️ Parrilla de Contenido del Mes")
+        st.caption(
+            "Analiza tus campañas pagadas y tus publicaciones orgánicas para recomendarte hasta 4 campañas "
+            "de Meta Ads (audiencia + presupuesto) y una parrilla de contenido orgánico con brief para tu "
+            "diseñador — basado en el rendimiento real de tu cuenta, sin usar una IA de pago."
+        )
+
+        if st.button("🎯 Generar recomendación del mes", type="primary", key="btn_generate_grid"):
+            st.session_state["grid_generated"] = True
+
+        if st.session_state.get("grid_generated"):
+            grid_page_id = PAGE_ID or globals().get("page_id_input", "")
+            if not grid_page_id:
+                st.warning(
+                    "No se detectó `PAGE_ID` en Secrets — la parte de contenido orgánico usará solo buenas "
+                    "prácticas estándar (sin analizar tus publicaciones reales)."
+                )
+
+            with st.spinner("Analizando campañas pagadas, audiencias y contenido orgánico (últimos 90 días)..."):
+                try:
+                    meta_df_wide = fetch_campaigns(account_id, "last_90d")
+                except Exception as e:
+                    meta_df_wide = pd.DataFrame()
+                    st.warning(f"No se pudo cargar el historial amplio de Meta Ads: {e}")
+                try:
+                    age_gender_df = fetch_age_gender_breakdown(account_id, "last_90d")
+                except Exception as e:
+                    age_gender_df = pd.DataFrame()
+                    st.warning(f"No se pudo cargar el desglose por edad/género: {e}")
+                try:
+                    organic_df = fetch_organic_posts(grid_page_id, ACCESS_TOKEN, limit=30)
+                except Exception as e:
+                    organic_df = pd.DataFrame()
+                    st.warning(f"No se pudo cargar el contenido orgánico: {e}")
+
+            st.divider()
+            st.subheader("👥 Cómo interactúa tu audiencia (últimos 90 días)")
+            if age_gender_df is not None and not age_gender_df.empty:
+                seg_view = age_gender_df.sort_values("CTR", ascending=False).head(8).copy()
+                seg_view["Segmento"] = seg_view["Edad"].astype(str) + " · " + seg_view["Género"]
+                fig = px.bar(
+                    seg_view.sort_values("CTR"), x="CTR", y="Segmento", orientation="h",
+                    color="Gasto", color_continuous_scale=PURPLE_SCALE,
+                    labels={"CTR": "CTR (%)"}, text="CTR",
+                )
+                fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside", cliponaxis=False)
+                fig.update_layout(height=320, margin=dict(l=0, r=60, t=0, b=0), yaxis_title="", coloraxis_showscale=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Sin datos suficientes de edad/género en el período — se usarán bandas estándar de telco.")
+
+            st.divider()
+            st.subheader("📣 Campañas de Meta Ads recomendadas")
+            st.caption("Máximo 4 campañas · presupuesto diario sugerido ≤ $4.00 por campaña.")
+            recos = generate_meta_campaign_recos(meta_df_wide, age_gender_df, max_campaigns=4, max_daily_budget=4.0)
+            total_budget = sum(r["Presupuesto diario"] for r in recos)
+            for r in recos:
+                with st.container(border=True):
+                    cc1, cc2, cc3 = st.columns([2, 1, 1])
+                    cc1.markdown(
+                        f"**{r['Campaña']}**\n\n👥 {r['Edad']} años · {r['Género']}\n\n"
+                        f"🎯 Intereses sugeridos: {r['Intereses sugeridos']}"
+                    )
+                    cc2.metric("💰 Presupuesto/día", f"${r['Presupuesto diario']:.2f}")
+                    cc3.metric("🎯 Objetivo", r["Objetivo"])
+                    st.caption(r["Justificación"])
+            st.info(
+                f"💰 Presupuesto diario total sugerido para las {len(recos)} campañas: "
+                f"**${total_budget:.2f}/día** (≈ ${total_budget * 30:.0f}/mes)."
+            )
+
+            st.divider()
+            st.subheader("🌱 Parrilla de contenido orgánico (brief para diseño)")
+            calendar_df, organic_note, top_posts = generate_organic_calendar(organic_df, weeks=4, posts_per_week=3)
+            st.markdown(organic_note)
+            st.dataframe(calendar_df, use_container_width=True, hide_index=True, height=460)
+            csv_bytes = calendar_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Descargar parrilla (CSV) para el diseñador", csv_bytes,
+                file_name="parrilla_contenido_mensual.csv", mime="text/csv",
+            )
+
+            if top_posts is not None and not top_posts.empty:
+                st.markdown("**📌 Tus 3 publicaciones orgánicas con mejor interacción (referencia de tono/formato):**")
+                st.dataframe(top_posts, use_container_width=True, hide_index=True)
+        else:
+            st.info("Presiona el botón para generar la recomendación del mes usando tus datos reales.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GOOGLE ADS
