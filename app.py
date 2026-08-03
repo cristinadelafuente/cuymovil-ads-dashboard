@@ -1153,25 +1153,75 @@ AGE_INTEREST_BANDS = [
 CONTENT_PILLARS = [
     {
         "nombre": "Promocional",
+        "objetivo": "Ventas / Conversión",
+        "concepto": "Planes ilimitados a tu medida",
+        "hook": "¿Sabías que puedes tener internet ilimitado desde S/19.90 al mes?",
+        "frases": ["Planes desde S/19.90", "Internet ilimitado", "Sin permanencia forzada"],
         "brief": "Pieza estática o carrusel con oferta/precio destacado en grande. Paleta morada (#5543CE) y lima "
                  "(#DCFE6D) de marca, logo Cuy visible, headline corto (máx. 6 palabras).",
     },
     {
         "nombre": "Educativo",
+        "objetivo": "Consideración / Educación de producto",
+        "concepto": "Aprende a sacarle el máximo provecho a tu plan",
+        "hook": "Así activas tu plan Cuy en menos de 2 minutos, sin ir a ninguna tienda.",
+        "frases": ["Activación 100% digital", "Internet ilimitado", "Recarga fácil, recarga rápido"],
         "brief": "Carrusel de 3–4 slides explicando un beneficio o cómo usar el servicio. Iconografía simple, "
                  "un mensaje por slide, texto grande legible en mobile.",
     },
     {
         "nombre": "Testimonial / Comunidad",
+        "objetivo": "Confianza / Prueba social",
+        "concepto": "Historias reales de usuarios Cuy",
+        "hook": "Esto es lo que dicen nuestros clientes sobre cambiarse a Cuy Móvil.",
+        "frases": ["La red que se adapta a ti", "Miles ya se cambiaron", "Internet ilimitado"],
         "brief": "Formato Reel corto (15–30s) con persona real o estilo UGC. Subtítulos quemados en el video, "
                  "tono cercano y auténtico, sin verse como anuncio tradicional.",
     },
     {
         "nombre": "Entretenimiento / Tendencia",
+        "objetivo": "Alcance / Reconocimiento de marca",
+        "concepto": "Cuy se sube a la tendencia",
+        "hook": "El plan que todos están recargando esta semana.",
+        "frases": ["Datos que no se acaban", "Conéctate sin límites", "Planes desde S/19.90"],
         "brief": "Reel con audio o formato de tendencia del momento, edición dinámica, texto en pantalla, "
                  "gancho visual en los primeros 3 segundos.",
     },
 ]
+
+# Banco de conceptos/ganchos/frases para las campañas de Ads, según objetivo de marketing
+AD_CONTENT_BY_OBJECTIVE = {
+    "Ventas / Conversiones": {
+        "concepto": "Cambia hoy, paga menos",
+        "hook": "¿Pagando de más por menos datos? Cámbiate a Cuy Móvil hoy.",
+        "frases": ["Planes desde S/19.90", "Internet ilimitado", "Cambio de operador sin costo"],
+    },
+    "Tráfico al sitio web": {
+        "concepto": "Descubre tu plan ideal",
+        "hook": "Encuentra en 1 minuto el plan Cuy que se adapta a ti.",
+        "frases": ["Elige tu plan online", "Internet ilimitado", "Activación 100% digital"],
+    },
+    "Interacción / Engagement": {
+        "concepto": "Cuéntanos qué necesitas",
+        "hook": "¿Qué es lo que más usas de tu celular? Te leemos en los comentarios.",
+        "frases": ["Datos que no se acaban", "La red que te escucha"],
+    },
+    "Captación de leads": {
+        "concepto": "Te llamamos con tu plan ideal",
+        "hook": "Déjanos tus datos y te armamos el plan perfecto para ti.",
+        "frases": ["Planes desde S/19.90", "Asesoría gratuita", "Internet ilimitado"],
+    },
+    "Reconocimiento de marca": {
+        "concepto": "Conoce a Cuy Móvil",
+        "hook": "La telefonía móvil que sí te conviene.",
+        "frases": ["Internet ilimitado", "Sin letra chica", "Planes desde S/19.90"],
+    },
+}
+DEFAULT_AD_CONTENT = {
+    "concepto": "Planes ilimitados a tu medida",
+    "hook": "¿Sabías que puedes tener internet ilimitado desde S/19.90 al mes?",
+    "frases": ["Planes desde S/19.90", "Internet ilimitado"],
+}
 
 DIAS_ES_ORDER = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
@@ -1325,11 +1375,16 @@ def generate_meta_campaign_recos(meta_df_wide: pd.DataFrame, age_gender_df: pd.D
                          "banda base de telco para probar y generar datos.")
         if i == 0 and objective_rank:
             rationale += f" El objetivo '{obj_label}' es el que históricamente mejor CTR ha tenido en tu cuenta."
+        ad_content = AD_CONTENT_BY_OBJECTIVE.get(obj_label, DEFAULT_AD_CONTENT)
         recos.append({
+            "Tipo": "📣 Ads",
             "Campaña": f"Campaña {i+1} · {obj_label}",
+            "Concepto": ad_content["concepto"],
             "Objetivo": obj_label,
             "Edad": seg["Edad"], "Género": seg["Género"],
             "Intereses sugeridos": ", ".join(interests),
+            "Hook": ad_content["hook"],
+            "Frases indispensables": ", ".join(ad_content["frases"]),
             "Presupuesto diario": budget_tiers[i],
             "Justificación": rationale,
         })
@@ -1379,15 +1434,52 @@ def generate_organic_calendar(organic_df: pd.DataFrame, weeks: int = 4, posts_pe
                 fmt_sugerido = "Imagen estática / Carrusel"
             rows.append({
                 "Semana": week,
+                "Tipo": "🌱 Orgánico",
                 "Día sugerido": day,
+                "Concepto": pillar["concepto"],
+                "Objetivo": pillar["objetivo"],
                 "Pilar de contenido": pillar["nombre"],
                 "Formato": fmt_sugerido,
+                "Hook": pillar["hook"],
+                "Frases indispensables": ", ".join(pillar["frases"]),
                 "Brief para diseño": pillar["brief"],
                 "CTA sugerido": "Más información" if pillar["nombre"] == "Promocional" else
                                 "Conoce más" if pillar["nombre"] == "Educativo" else "Síguenos / Comenta",
             })
     calendar_df = pd.DataFrame(rows)
     return calendar_df, note, top_posts
+
+def generate_unified_grid(calendar_df: pd.DataFrame, ads_recos: list, weeks: int = 4) -> pd.DataFrame:
+    """Combina la parrilla orgánica y las campañas de Ads recomendadas en una sola parrilla de contenidos del mes."""
+    ad_rows = []
+    for week in range(1, weeks + 1):
+        if not ads_recos:
+            break
+        reco = ads_recos[(week - 1) % len(ads_recos)]
+        ad_rows.append({
+            "Semana": week,
+            "Tipo": "📣 Ads",
+            "Día sugerido": "Activa toda la semana (mantener presupuesto sugerido)",
+            "Concepto": reco["Concepto"],
+            "Objetivo": reco["Objetivo"],
+            "Pilar de contenido": f"Audiencia: {reco['Edad']} años · {reco['Género']}",
+            "Formato": "Imagen o video para Feed/Stories/Reels",
+            "Hook": reco["Hook"],
+            "Frases indispensables": reco["Frases indispensables"],
+            "Brief para diseño": (
+                f"Presupuesto diario sugerido: ${reco['Presupuesto diario']:.2f}. Intereses de segmentación: "
+                f"{reco['Intereses sugeridos']}. Usar la misma identidad de marca (morado #5543CE / lima #DCFE6D)."
+            ),
+            "CTA sugerido": "Más información" if "Ventas" in reco["Objetivo"] or "Tráfico" in reco["Objetivo"]
+                            else "Contáctanos" if "leads" in reco["Objetivo"] else "Ver más",
+        })
+    ads_df = pd.DataFrame(ad_rows)
+    combined = pd.concat([ads_df, calendar_df], ignore_index=True) if not ads_df.empty else calendar_df.copy()
+    combined = combined.sort_values(["Semana", "Tipo"], ascending=[True, False]).reset_index(drop=True)
+    cols = ["Semana", "Tipo", "Día sugerido", "Concepto", "Objetivo", "Pilar de contenido",
+            "Formato", "Hook", "Frases indispensables", "Brief para diseño", "CTA sugerido"]
+    cols = [c for c in cols if c in combined.columns]
+    return combined[cols]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
@@ -2201,14 +2293,14 @@ elif nav_section == "📊 Meta Ads":
                     "prácticas estándar (sin analizar tus publicaciones reales)."
                 )
 
-            with st.spinner("Analizando campañas pagadas, audiencias y contenido orgánico (últimos 90 días)..."):
+            with st.spinner("Analizando campañas pagadas, audiencias y contenido orgánico (últimos 60 días)..."):
                 try:
-                    meta_df_wide = fetch_campaigns(account_id, "last_90d")
+                    meta_df_wide = fetch_campaigns(account_id, "last_60d")
                 except Exception as e:
                     meta_df_wide = pd.DataFrame()
                     st.warning(f"No se pudo cargar el historial amplio de Meta Ads: {e}")
                 try:
-                    age_gender_df = fetch_age_gender_breakdown(account_id, "last_90d")
+                    age_gender_df = fetch_age_gender_breakdown(account_id, "last_60d")
                 except Exception as e:
                     age_gender_df = pd.DataFrame()
                     st.warning(f"No se pudo cargar el desglose por edad/género: {e}")
@@ -2219,7 +2311,7 @@ elif nav_section == "📊 Meta Ads":
                     st.warning(f"No se pudo cargar el contenido orgánico: {e}")
 
             st.divider()
-            st.subheader("👥 Cómo interactúa tu audiencia (últimos 90 días)")
+            st.subheader("👥 Cómo interactúa tu audiencia (últimos 60 días)")
             if age_gender_df is not None and not age_gender_df.empty:
                 seg_view = age_gender_df.sort_values("CTR", ascending=False).head(8).copy()
                 seg_view["Segmento"] = seg_view["Edad"].astype(str) + " · " + seg_view["Género"]
@@ -2243,8 +2335,11 @@ elif nav_section == "📊 Meta Ads":
                 with st.container(border=True):
                     cc1, cc2, cc3 = st.columns([2, 1, 1])
                     cc1.markdown(
-                        f"**{r['Campaña']}**\n\n👥 {r['Edad']} años · {r['Género']}\n\n"
-                        f"🎯 Intereses sugeridos: {r['Intereses sugeridos']}"
+                        f"**📣 {r['Campaña']}**\n\n💡 Concepto: **{r['Concepto']}**\n\n"
+                        f"👥 {r['Edad']} años · {r['Género']}\n\n"
+                        f"🎯 Intereses sugeridos: {r['Intereses sugeridos']}\n\n"
+                        f"🪝 Hook: _{r['Hook']}_\n\n"
+                        f"✍️ Frases indispensables: {r['Frases indispensables']}"
                     )
                     cc2.metric("💰 Presupuesto/día", f"${r['Presupuesto diario']:.2f}")
                     cc3.metric("🎯 Objetivo", r["Objetivo"])
@@ -2255,11 +2350,13 @@ elif nav_section == "📊 Meta Ads":
             )
 
             st.divider()
-            st.subheader("🌱 Parrilla de contenido orgánico (brief para diseño)")
+            st.subheader("🗓️ Parrilla de contenidos del mes (Orgánico + Ads)")
             calendar_df, organic_note, top_posts = generate_organic_calendar(organic_df, weeks=4, posts_per_week=3)
             st.markdown(organic_note)
-            st.dataframe(calendar_df, use_container_width=True, hide_index=True, height=460)
-            csv_bytes = calendar_df.to_csv(index=False).encode("utf-8")
+            unified_df = generate_unified_grid(calendar_df, recos, weeks=4)
+            st.caption("La columna **Tipo** indica si esa pieza es 🌱 Orgánico o 📣 Ads.")
+            st.dataframe(unified_df, use_container_width=True, hide_index=True, height=560)
+            csv_bytes = unified_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Descargar parrilla (CSV) para el diseñador", csv_bytes,
                 file_name="parrilla_contenido_mensual.csv", mime="text/csv",
