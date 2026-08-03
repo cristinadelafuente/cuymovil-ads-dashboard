@@ -2293,14 +2293,18 @@ elif nav_section == "📊 Meta Ads":
                     "prácticas estándar (sin analizar tus publicaciones reales)."
                 )
 
+            _grid_until = datetime.now(PERU_TZ).date()
+            _grid_since = _grid_until - timedelta(days=60)
+            _grid_since_str, _grid_until_str = _grid_since.strftime("%Y-%m-%d"), _grid_until.strftime("%Y-%m-%d")
+
             with st.spinner("Analizando campañas pagadas, audiencias y contenido orgánico (últimos 60 días)..."):
                 try:
-                    meta_df_wide = fetch_campaigns(account_id, "last_60d")
+                    meta_df_wide = fetch_campaigns(account_id, "custom", _grid_since_str, _grid_until_str)
                 except Exception as e:
                     meta_df_wide = pd.DataFrame()
                     st.warning(f"No se pudo cargar el historial amplio de Meta Ads: {e}")
                 try:
-                    age_gender_df = fetch_age_gender_breakdown(account_id, "last_60d")
+                    age_gender_df = fetch_age_gender_breakdown(account_id, "custom", _grid_since_str, _grid_until_str)
                 except Exception as e:
                     age_gender_df = pd.DataFrame()
                     st.warning(f"No se pudo cargar el desglose por edad/género: {e}")
