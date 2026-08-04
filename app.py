@@ -1574,6 +1574,13 @@ with st.sidebar:
             else:
                 st.warning("Selecciona una fecha de inicio y una de fin.")
 
+        gads_name_filter = st.text_input(
+            "Filtrar por nombre de campaña",
+            value="Cuy",
+            key="gads_name_filter",
+            placeholder="ej. Cuy",
+            help="Muestra solo campañas cuyo nombre contenga este texto (la cuenta de Google Ads incluye varias marcas de Guinea Mobile). Déjalo vacío para ver todas.",
+        )
         st.caption(f"Cuenta: `{GOOGLE_ADS_CUSTOMER_ID}`")
         if st.button("🔄 Actualizar datos", use_container_width=True, key="refresh_gads"):
             st.cache_data.clear()
@@ -2407,6 +2414,21 @@ elif nav_section == "🔍 Google Ads":
     if gads_df.empty:
         st.info("No hay datos disponibles para este período.")
         st.stop()
+
+    gads_df_unfiltered = gads_df
+    if gads_name_filter.strip():
+        gads_df = gads_df[gads_df["Campaña"].str.contains(gads_name_filter, case=False, na=False)]
+        st.caption(f"🔎 Mostrando solo campañas cuyo nombre contiene: **{gads_name_filter}**")
+        if gads_df.empty:
+            st.warning(
+                f"Ninguna campaña coincide con '{gads_name_filter}'. Estos son los nombres de campaña disponibles "
+                "en esta cuenta — ajusta el filtro en el panel izquierdo:"
+            )
+            st.dataframe(
+                gads_df_unfiltered[["Campaña"]].drop_duplicates(),
+                use_container_width=True, hide_index=True,
+            )
+            st.stop()
 
     st.subheader("Resumen del período")
     total_spend       = gads_df["Gasto"].sum()
