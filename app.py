@@ -149,6 +149,13 @@ GOOGLE_ADS_DEVELOPER_TOKEN = get_secret("GOOGLE_ADS_DEVELOPER_TOKEN")
 GOOGLE_ADS_LOGIN_CUSTOMER_ID = get_secret("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
 GOOGLE_ADS_CUSTOMER_ID = get_secret("GOOGLE_ADS_CUSTOMER_ID") or "9778403348"
 
+# ── Usuarios y roles (control de acceso) ──────────────────────────────────────
+_USERS_RAW = get_secret("USERS")
+try:
+    USERS = {str(k).strip().lower(): dict(v) for k, v in _USERS_RAW.items()} if _USERS_RAW else {}
+except Exception:
+    USERS = {}
+
 # ── Constantes ───────────────────────────────────────────────────────────────
 ACCOUNTS = {
     "Norte Digital [NDPE] — Cuy Móvil": "act_4207138246212675",
@@ -1482,6 +1489,45 @@ def generate_unified_grid(calendar_df: pd.DataFrame, ads_recos: list, weeks: int
     return combined[cols]
 
 # ══════════════════════════════════════════════════════════════════════════════
+# LOGIN Y CONTROL DE ACCESO
+# ══════════════════════════════════════════════════════════════════════════════
+def check_login() -> bool:
+    if st.session_state.get("auth_ok"):
+        return True
+
+    st.title("🐹 Cuy Móvil · Meta Ads Dashboard")
+    st.subheader("🔒 Iniciar sesión")
+
+    if not USERS:
+        st.error(
+            "No hay usuarios configurados todavía. Agrega la tabla `USERS` en "
+            "Streamlit Cloud → Settings → Secrets para habilitar el acceso."
+        )
+        return False
+
+    with st.form("login_form"):
+        email = st.text_input("Correo")
+        password = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Ingresar", type="primary")
+
+    if submitted:
+        user = USERS.get(email.strip().lower())
+        if user and password == user.get("password"):
+            st.session_state["auth_ok"] = True
+            st.session_state["auth_email"] = email.strip()
+            st.session_state["auth_role"] = user.get("role", "viewer")
+            st.rerun()
+        else:
+            st.error("Correo o contraseña incorrectos.")
+    return False
+
+if not check_login():
+    st.stop()
+
+ROLE = st.session_state.get("auth_role", "viewer")
+IS_ADMIN = ROLE == "admin"
+
+# ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 col_title, col_time = st.columns([4, 1])
@@ -1492,6 +1538,13 @@ with col_time:
 
 with st.sidebar:
     st.header("🗂️ Accesos")
+    _role_label = "🛠️ Administrador" if IS_ADMIN else "👁️ Solo lectura"
+    st.caption(f"Sesión: **{st.session_state.get('auth_email', '')}** · {_role_label}")
+    if st.button("Cerrar sesión", key="btn_logout", use_container_width=True):
+        for _k in ("auth_ok", "auth_email", "auth_role"):
+            st.session_state.pop(_k, None)
+        st.rerun()
+    st.divider()
     nav_section = st.radio(
         "Selecciona una plataforma",
         ["📋 Resumen", "📊 Meta Ads", "🔍 Google Ads", "📈 Web Analytics", "🖱️ Clarity"],
@@ -1933,354 +1986,360 @@ elif nav_section == "📊 Meta Ads":
     # TAB 2 — CREAR ANUNCIO
     # ══════════════════════════════════════════════════════════════════════════════
     with tab_create:
-        st.header("➕ Crear nuevo anuncio")
-        st.caption("El anuncio se crea en estado **PAUSADO**. Revísalo en Ads Manager antes de activarlo.")
-
-        # Page ID
-        page_id_input = PAGE_ID or ""
-        if not page_id_input:
-            st.warning("Configura `PAGE_ID` en Streamlit Cloud → Settings → Secrets con el ID de tu página de Facebook.")
-            page_id_input = st.text_input(
-                "O ingrésalo aquí temporalmente:",
-                placeholder="ej. 123456789012345",
-                help="Ve a tu página de Facebook → Acerca de → desplázate al fondo → 'ID de la página'"
+        if not IS_ADMIN:
+            st.info(
+                "🔒 Esta sección es solo para administradores. Tu cuenta tiene acceso de solo "
+                "lectura y no puede crear ni publicar anuncios."
             )
         else:
-            st.success(f"✅ Página configurada: `{page_id_input}`")
+            st.header("➕ Crear nuevo anuncio")
+            st.caption("El anuncio se crea en estado **PAUSADO**. Revísalo en Ads Manager antes de activarlo.")
 
-        st.divider()
-
-        # ── PASO 1: Campaña ───────────────────────────────────────────────────────
-        st.subheader("1️⃣  Campaña")
-        p1a, p1b = st.columns(2)
-        with p1a:
-            camp_name = st.text_input("Nombre de la campaña *", placeholder="ej. JUL26_Ventas_Ilimitados")
-        with p1b:
-            obj_label = st.selectbox("Objetivo *", list(OBJECTIVES.keys()))
-            objective = OBJECTIVES[obj_label]
-
-        st.markdown("**¿Dónde quieres publicar?**")
-        PLATFORM_MAP = {"Facebook": "facebook", "Instagram": "instagram"}
-        platforms_selected = st.multiselect(
-            "Plataformas *", list(PLATFORM_MAP.keys()), default=["Facebook", "Instagram"]
-        )
-
-        differentiate_budget = False
-        budget_by_platform = {}
-        if len(platforms_selected) == 2:
-            differentiate_budget = st.checkbox(
-                "Usar presupuestos diferenciados por plataforma",
-                help="Si lo activas, se crea un conjunto de anuncios independiente por cada plataforma, cada uno con su propio presupuesto diario.",
-            )
-
-        if differentiate_budget:
-            pb1, pb2 = st.columns(2)
-            budget_by_platform["facebook"]  = pb1.number_input("Presupuesto diario Facebook (USD) *", min_value=1.0, value=10.0, step=1.0)
-            budget_by_platform["instagram"] = pb2.number_input("Presupuesto diario Instagram (USD) *", min_value=1.0, value=10.0, step=1.0)
-            daily_budget_total = sum(budget_by_platform.values())
-        else:
-            daily_budget_total = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=10.0, step=1.0)
-
-        st.divider()
-
-        # ── PASO 2: Audiencia ─────────────────────────────────────────────────────
-        st.subheader("2️⃣  Audiencia")
-
-        with st.expander("🤖 Asistente IA de segmentación", expanded=True):
-            st.markdown("Describe con tus palabras a quién quieres mostrarle el anuncio:")
-            ai_description = st.text_area(
-                "audience_desc",
-                placeholder='Ej: "Jóvenes peruanos de 18-30 años que usan smartphones y siguen páginas de competidores como Claro y Entel"',
-                height=80,
-                label_visibility="collapsed",
-            )
-            if st.button("✨ Generar sugerencia de segmentación", type="secondary"):
-                if ai_description.strip():
-                    with st.spinner("Analizando tu audiencia y buscando intereses reales en Meta..."):
-                        sugg = ai_suggest_segmentation(ai_description)
-                        # Resolver cada término sugerido contra intereses REALES de Meta (no genéricos)
-                        resolved = []
-                        all_terms = sugg["brand_keywords"] + sugg["interest_keywords"]
-                        for term in all_terms[:8]:  # límite razonable de llamadas a la API
-                            match = resolve_best_interest(term)
-                            if match:
-                                resolved.append(match)
-                                st.session_state["selected_interests_map"][match["id"]] = match["name"]
-                        sugg["resolved_count"] = len(resolved)
-                        sugg["unresolved"] = [t for t in all_terms[:8] if t not in [r["name"] for r in resolved]]
-                    st.session_state["ai_sugg"] = sugg
-                else:
-                    st.warning("Escribe una descripción primero.")
-
-            if st.session_state.get("ai_sugg"):
-                sugg = st.session_state["ai_sugg"]
-                gender_label = {"all": "Todos", "male": "Hombres", "female": "Mujeres"}.get(sugg["gender"], "Todos")
-                sc1, sc2, sc3 = st.columns(3)
-                sc1.markdown(f"🌍 **Países:** {', '.join(sugg['countries'])}")
-                sc2.markdown(f"👤 **Edad:** {sugg['age_min']}–{sugg['age_max']} (banda angosta, no genérica)")
-                sc3.markdown(f"⚧️ **Género:** {gender_label}")
-                if sugg.get("resolved_count"):
-                    st.success(f"✅ Se agregaron {sugg['resolved_count']} intereses **reales** de Meta directamente a tu selección (ver abajo, en '{'Intereses seleccionados'}').")
-                if sugg.get("unresolved"):
-                    st.caption(f"No se encontraron en Meta como interés catalogado: {', '.join(sugg['unresolved'])} — puedes buscarlos manualmente abajo.")
-                if sugg.get("narrow_logic"):
-                    st.caption("💡 Esta audiencia combina varias señales específicas — es intencionalmente más angosta que una segmentación genérica. Revisa el estimado de audiencia más abajo.")
-                for note in sugg.get("notes", []):
-                    st.markdown(note)
-
-        # Campos de audiencia
-        ai_sugg = st.session_state.get("ai_sugg", {})
-        a1, a2 = st.columns(2)
-        with a1:
-            default_countries = [k for k, v in COUNTRIES_ES.items() if v in ai_sugg.get("countries", ["PE"])]
-            selected_countries_es = st.multiselect(
-                "Países *", list(COUNTRIES_ES.keys()),
-                default=default_countries or ["Perú"],
-            )
-            selected_countries = [COUNTRIES_ES[c] for c in selected_countries_es]
-        with a2:
-            gender_default_idx = {"all": 0, "male": 1, "female": 2}.get(ai_sugg.get("gender", "all"), 0)
-            gender_choice = st.radio("Género", ["Todos", "Hombres", "Mujeres"],
-                                     horizontal=True, index=gender_default_idx)
-            genders = {"Todos": [], "Hombres": [1], "Mujeres": [2]}[gender_choice]
-
-        age_min, age_max = st.slider(
-            "Rango de edad",
-            min_value=13, max_value=65,
-            value=(ai_sugg.get("age_min", 18), ai_sugg.get("age_max", 45)),
-        )
-
-        # Búsqueda de intereses
-        st.markdown("**Intereses** — busca y selecciona")
-        bi1, bi2 = st.columns([3, 1])
-        with bi1:
-            interest_query = st.text_input(
-                "interest_search", label_visibility="collapsed",
-                placeholder="ej. Telefonía móvil, Smartphones, Claro Peru…"
-            )
-        with bi2:
-            do_search = st.button("🔍 Buscar intereses")
-
-        if do_search:
-            if interest_query.strip():
-                with st.spinner("Consultando Meta..."):
-                    found = search_meta_interests(interest_query)
-                st.session_state["interest_results"] = found
-            else:
-                st.warning("Escribe un término primero.")
-
-        # Acumulador persistente de intereses elegidos (sobrevive a nuevas búsquedas)
-        if "selected_interests_map" not in st.session_state:
-            st.session_state["selected_interests_map"] = {}  # id -> name
-
-        if "interest_results" in st.session_state:
-            results = st.session_state["interest_results"]
-            if results:
-                for r in results:
-                    already = r["id"] in st.session_state["selected_interests_map"]
-                    checked = st.checkbox(
-                        f"{r['name']}  (~{r['audience']:,.0f} personas)",
-                        value=already,
-                        key=f"chk_interest_{r['id']}",
-                    )
-                    if checked:
-                        st.session_state["selected_interests_map"][r["id"]] = r["name"]
-                    elif already:
-                        del st.session_state["selected_interests_map"][r["id"]]
-            else:
-                st.info("Sin resultados — prueba otro término.")
-
-        # Mostrar todos los intereses elegidos hasta ahora (de todas las búsquedas)
-        if st.session_state["selected_interests_map"]:
-            st.markdown("**Intereses seleccionados:**")
-            for iid, iname in list(st.session_state["selected_interests_map"].items()):
-                rm_col1, rm_col2 = st.columns([5, 1])
-                rm_col1.write(f"🎯 {iname}")
-                if rm_col2.button("✕ Quitar", key=f"rm_interest_{iid}"):
-                    del st.session_state["selected_interests_map"][iid]
-                    st.rerun()
-
-        selected_interest_ids = list(st.session_state["selected_interests_map"].keys())
-
-        # Públicos Lookalike
-        st.markdown("**Públicos Lookalike** (basados en tus clientes o públicos existentes)")
-        lookalikes = fetch_lookalike_audiences(account_id)
-        selected_lookalike_ids = []
-        if lookalikes:
-            lookalike_options = {f"{a['name']}  (~{a['size']:,.0f} personas)": a["id"] for a in lookalikes}
-            chosen_lookalikes = st.multiselect("Selecciona públicos Lookalike:", list(lookalike_options.keys()))
-            selected_lookalike_ids = [lookalike_options[c] for c in chosen_lookalikes]
-        else:
-            st.caption("No se encontraron públicos Lookalike en esta cuenta. Puedes crear uno en Ads Manager → Públicos → Crear público → Lookalike, a partir de tu lista de clientes o de tu página.")
-
-        # Estimado real de audiencia — mide qué tan fina quedó la segmentación
-        if selected_countries:
-            with st.spinner("Calculando tamaño de audiencia..."):
-                audience_est = get_audience_estimate(
-                    account_id, selected_countries, age_min, age_max, genders, selected_interest_ids
+            # Page ID
+            page_id_input = PAGE_ID or ""
+            if not page_id_input:
+                st.warning("Configura `PAGE_ID` en Streamlit Cloud → Settings → Secrets con el ID de tu página de Facebook.")
+                page_id_input = st.text_input(
+                    "O ingrésalo aquí temporalmente:",
+                    placeholder="ej. 123456789012345",
+                    help="Ve a tu página de Facebook → Acerca de → desplázate al fondo → 'ID de la página'"
                 )
-            if audience_est is not None:
-                if audience_est < 50_000:
-                    st.info(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — muy específica. Bien si buscas precisión, pero vigila que no sea tan chica que limite la entrega.")
-                elif audience_est < 500_000:
-                    st.success(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — segmentación fina, buen equilibrio entre precisión y alcance.")
-                else:
-                    st.warning(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — todavía amplia. Agrega más intereses o acorta el rango de edad para afinar más.")
+            else:
+                st.success(f"✅ Página configurada: `{page_id_input}`")
 
-        st.divider()
+            st.divider()
 
-        # ── PASO 3: Creatividad ───────────────────────────────────────────────────
-        st.subheader("3️⃣  Creatividad del anuncio")
+            # ── PASO 1: Campaña ───────────────────────────────────────────────────────
+            st.subheader("1️⃣  Campaña")
+            p1a, p1b = st.columns(2)
+            with p1a:
+                camp_name = st.text_input("Nombre de la campaña *", placeholder="ej. JUL26_Ventas_Ilimitados")
+            with p1b:
+                obj_label = st.selectbox("Objetivo *", list(OBJECTIVES.keys()))
+                objective = OBJECTIVES[obj_label]
 
-        uploaded_image = st.file_uploader(
-            "Imagen del anuncio * (JPG o PNG — mín. 1080×1080 px recomendado)",
-            type=["jpg", "jpeg", "png"],
-        )
-        if uploaded_image:
-            st.image(uploaded_image, caption="Imagen cargada", width=280)
-
-        cr1, cr2 = st.columns(2)
-        with cr1:
-            primary_text = st.text_area(
-                "Texto principal *",
-                placeholder="Ej: ¡Conéctate sin límites con Cuy Móvil! 🐹 Planes desde S/39.",
-                height=100,
+            st.markdown("**¿Dónde quieres publicar?**")
+            PLATFORM_MAP = {"Facebook": "facebook", "Instagram": "instagram"}
+            platforms_selected = st.multiselect(
+                "Plataformas *", list(PLATFORM_MAP.keys()), default=["Facebook", "Instagram"]
             )
-            headline = st.text_input("Titular *", placeholder="Ej: Plan Ilimitado desde S/39")
-        with cr2:
-            ad_description = st.text_input("Descripción", placeholder="Ej: Sin cortes, sin límites. Pruébalo gratis 7 días.")
-            destination_url = st.text_input("URL de destino *", placeholder="https://cuymovil.pe")
-            cta_label = st.selectbox("Botón de acción (CTA)", list(CTA_OPTIONS.keys()))
-            cta_type  = CTA_OPTIONS[cta_label]
 
-        # Vista previa del anuncio (usa la API de Meta, no publica nada)
-        st.markdown("**👁️ Vista previa del anuncio**")
-        preview_platform_label = st.radio(
-            "Ver como se vería en:",
-            ["Facebook (feed móvil)", "Instagram (feed)"],
-            horizontal=True,
-        )
-        preview_ad_format = "MOBILE_FEED_STANDARD" if "Facebook" in preview_platform_label else "INSTAGRAM_STANDARD"
+            differentiate_budget = False
+            budget_by_platform = {}
+            if len(platforms_selected) == 2:
+                differentiate_budget = st.checkbox(
+                    "Usar presupuestos diferenciados por plataforma",
+                    help="Si lo activas, se crea un conjunto de anuncios independiente por cada plataforma, cada uno con su propio presupuesto diario.",
+                )
 
-        if st.button("🔍 Generar vista previa"):
-            if not uploaded_image or not page_id_input or not destination_url:
-                st.warning("Sube una imagen, indica el ID de página y la URL de destino antes de generar la vista previa.")
-            else:
-                with st.spinner("Generando vista previa con Meta..."):
-                    try:
-                        preview_image_bytes = uploaded_image.getvalue()
-                        preview_image_ext = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
-                        preview_hash = upload_ad_image(account_id, preview_image_bytes, preview_image_ext)
-                        st.session_state["preview_image_hash"] = preview_hash
-                        preview_html = get_ad_preview_html(
-                            account_id, page_id_input, preview_hash,
-                            primary_text or " ", headline or " ", ad_description or "",
-                            destination_url, cta_type, preview_ad_format,
-                        )
-                        st.session_state["preview_html"] = preview_html
-                    except Exception as e:
-                        st.error(f"No se pudo generar la vista previa: {e}")
-
-        if st.session_state.get("preview_html"):
-            st.components.v1.html(st.session_state["preview_html"], height=600, scrolling=True)
-
-        st.divider()
-
-        # ── PASO 4: Detalles finales ──────────────────────────────────────────────
-        st.subheader("4️⃣  Detalles finales")
-        d1, d2 = st.columns(2)
-        with d1:
-            start_date = st.date_input("Fecha de inicio", value=date.today())
-        with d2:
             if differentiate_budget:
-                resumen_presupuesto = " · ".join(f"{k.capitalize()}: ${v:.2f}/día" for k, v in budget_by_platform.items())
+                pb1, pb2 = st.columns(2)
+                budget_by_platform["facebook"]  = pb1.number_input("Presupuesto diario Facebook (USD) *", min_value=1.0, value=10.0, step=1.0)
+                budget_by_platform["instagram"] = pb2.number_input("Presupuesto diario Instagram (USD) *", min_value=1.0, value=10.0, step=1.0)
+                daily_budget_total = sum(budget_by_platform.values())
             else:
-                resumen_presupuesto = f"${daily_budget_total:.2f}/día ({', '.join(platforms_selected) or 'sin plataforma'})"
-            st.info(f"**Cuenta:** {account_label}\n\n**Presupuesto:** {resumen_presupuesto}")
+                daily_budget_total = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=10.0, step=1.0)
 
-        st.divider()
+            st.divider()
 
-        # ── Validación y botón de publicar ────────────────────────────────────────
-        missing = []
-        if not camp_name:          missing.append("Nombre de campaña")
-        if not page_id_input:      missing.append("ID de página de Facebook")
-        if not destination_url:    missing.append("URL de destino")
-        if not primary_text:       missing.append("Texto principal")
-        if not headline:           missing.append("Titular")
-        if not uploaded_image:     missing.append("Imagen del anuncio")
-        if not selected_countries: missing.append("Al menos un país")
-        if not platforms_selected: missing.append("Al menos una plataforma (Facebook o Instagram)")
+            # ── PASO 2: Audiencia ─────────────────────────────────────────────────────
+            st.subheader("2️⃣  Audiencia")
 
-        if missing:
-            st.warning("Faltan campos requeridos: " + "  ·  ".join(missing))
-            st.button("🚀 Crear anuncio (pausado)", type="primary", disabled=True)
-        else:
-            if st.button("🚀 Crear anuncio (pausado)", type="primary"):
-                with st.spinner("Creando campaña → conjunto(s) → imagen → creatividad → anuncio(s)…"):
-                    try:
-                        image_bytes = uploaded_image.read()
-                        image_ext   = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+            with st.expander("🤖 Asistente IA de segmentación", expanded=True):
+                st.markdown("Describe con tus palabras a quién quieres mostrarle el anuncio:")
+                ai_description = st.text_area(
+                    "audience_desc",
+                    placeholder='Ej: "Jóvenes peruanos de 18-30 años que usan smartphones y siguen páginas de competidores como Claro y Entel"',
+                    height=80,
+                    label_visibility="collapsed",
+                )
+                if st.button("✨ Generar sugerencia de segmentación", type="secondary"):
+                    if ai_description.strip():
+                        with st.spinner("Analizando tu audiencia y buscando intereses reales en Meta..."):
+                            sugg = ai_suggest_segmentation(ai_description)
+                            # Resolver cada término sugerido contra intereses REALES de Meta (no genéricos)
+                            resolved = []
+                            all_terms = sugg["brand_keywords"] + sugg["interest_keywords"]
+                            for term in all_terms[:8]:  # límite razonable de llamadas a la API
+                                match = resolve_best_interest(term)
+                                if match:
+                                    resolved.append(match)
+                                    st.session_state["selected_interests_map"][match["id"]] = match["name"]
+                            sugg["resolved_count"] = len(resolved)
+                            sugg["unresolved"] = [t for t in all_terms[:8] if t not in [r["name"] for r in resolved]]
+                        st.session_state["ai_sugg"] = sugg
+                    else:
+                        st.warning("Escribe una descripción primero.")
 
-                        # Armar la configuración de conjuntos de anuncios por plataforma
-                        if differentiate_budget:
-                            adset_configs = []
-                            if "Facebook" in platforms_selected:
-                                adset_configs.append({"platforms": ["facebook"], "budget": budget_by_platform["facebook"], "suffix": "FB"})
-                            if "Instagram" in platforms_selected:
-                                adset_configs.append({"platforms": ["instagram"], "budget": budget_by_platform["instagram"], "suffix": "IG"})
-                        else:
-                            chosen_platform_codes = [PLATFORM_MAP[p] for p in platforms_selected]
-                            adset_configs = [{"platforms": chosen_platform_codes, "budget": daily_budget_total, "suffix": ""}]
+                if st.session_state.get("ai_sugg"):
+                    sugg = st.session_state["ai_sugg"]
+                    gender_label = {"all": "Todos", "male": "Hombres", "female": "Mujeres"}.get(sugg["gender"], "Todos")
+                    sc1, sc2, sc3 = st.columns(3)
+                    sc1.markdown(f"🌍 **Países:** {', '.join(sugg['countries'])}")
+                    sc2.markdown(f"👤 **Edad:** {sugg['age_min']}–{sugg['age_max']} (banda angosta, no genérica)")
+                    sc3.markdown(f"⚧️ **Género:** {gender_label}")
+                    if sugg.get("resolved_count"):
+                        st.success(f"✅ Se agregaron {sugg['resolved_count']} intereses **reales** de Meta directamente a tu selección (ver abajo, en '{'Intereses seleccionados'}').")
+                    if sugg.get("unresolved"):
+                        st.caption(f"No se encontraron en Meta como interés catalogado: {', '.join(sugg['unresolved'])} — puedes buscarlos manualmente abajo.")
+                    if sugg.get("narrow_logic"):
+                        st.caption("💡 Esta audiencia combina varias señales específicas — es intencionalmente más angosta que una segmentación genérica. Revisa el estimado de audiencia más abajo.")
+                    for note in sugg.get("notes", []):
+                        st.markdown(note)
 
-                        result = create_full_ad(
-                            account_id=account_id,
-                            page_id=page_id_input,
-                            camp_name=camp_name,
-                            objective=objective,
-                            adset_configs=adset_configs,
-                            countries=selected_countries,
-                            age_min=age_min,
-                            age_max=age_max,
-                            genders=genders,
-                            interest_ids=selected_interest_ids,
-                            custom_audience_ids=selected_lookalike_ids,
-                            image_bytes=image_bytes,
-                            image_ext=image_ext,
-                            primary_text=primary_text,
-                            headline=headline,
-                            ad_description=ad_description,
-                            destination_url=destination_url,
-                            cta_type=cta_type,
-                            start_date=start_date,
+            # Campos de audiencia
+            ai_sugg = st.session_state.get("ai_sugg", {})
+            a1, a2 = st.columns(2)
+            with a1:
+                default_countries = [k for k, v in COUNTRIES_ES.items() if v in ai_sugg.get("countries", ["PE"])]
+                selected_countries_es = st.multiselect(
+                    "Países *", list(COUNTRIES_ES.keys()),
+                    default=default_countries or ["Perú"],
+                )
+                selected_countries = [COUNTRIES_ES[c] for c in selected_countries_es]
+            with a2:
+                gender_default_idx = {"all": 0, "male": 1, "female": 2}.get(ai_sugg.get("gender", "all"), 0)
+                gender_choice = st.radio("Género", ["Todos", "Hombres", "Mujeres"],
+                                         horizontal=True, index=gender_default_idx)
+                genders = {"Todos": [], "Hombres": [1], "Mujeres": [2]}[gender_choice]
+
+            age_min, age_max = st.slider(
+                "Rango de edad",
+                min_value=13, max_value=65,
+                value=(ai_sugg.get("age_min", 18), ai_sugg.get("age_max", 45)),
+            )
+
+            # Búsqueda de intereses
+            st.markdown("**Intereses** — busca y selecciona")
+            bi1, bi2 = st.columns([3, 1])
+            with bi1:
+                interest_query = st.text_input(
+                    "interest_search", label_visibility="collapsed",
+                    placeholder="ej. Telefonía móvil, Smartphones, Claro Peru…"
+                )
+            with bi2:
+                do_search = st.button("🔍 Buscar intereses")
+
+            if do_search:
+                if interest_query.strip():
+                    with st.spinner("Consultando Meta..."):
+                        found = search_meta_interests(interest_query)
+                    st.session_state["interest_results"] = found
+                else:
+                    st.warning("Escribe un término primero.")
+
+            # Acumulador persistente de intereses elegidos (sobrevive a nuevas búsquedas)
+            if "selected_interests_map" not in st.session_state:
+                st.session_state["selected_interests_map"] = {}  # id -> name
+
+            if "interest_results" in st.session_state:
+                results = st.session_state["interest_results"]
+                if results:
+                    for r in results:
+                        already = r["id"] in st.session_state["selected_interests_map"]
+                        checked = st.checkbox(
+                            f"{r['name']}  (~{r['audience']:,.0f} personas)",
+                            value=already,
+                            key=f"chk_interest_{r['id']}",
                         )
+                        if checked:
+                            st.session_state["selected_interests_map"][r["id"]] = r["name"]
+                        elif already:
+                            del st.session_state["selected_interests_map"][r["id"]]
+                else:
+                    st.info("Sin resultados — prueba otro término.")
 
-                        st.success("✅ ¡Anuncio creado exitosamente en estado PAUSADO!")
-                        r1, r2 = st.columns(2)
-                        with r1:
-                            adsets_md = "\n".join(
-                                f"- 👥 Conjunto ({', '.join(a['platforms'])}, ${a['budget']:.2f}/día): `{a['adset_id']}` → Anuncio: `{a['ad_id']}`"
-                                for a in result["adsets"]
+            # Mostrar todos los intereses elegidos hasta ahora (de todas las búsquedas)
+            if st.session_state["selected_interests_map"]:
+                st.markdown("**Intereses seleccionados:**")
+                for iid, iname in list(st.session_state["selected_interests_map"].items()):
+                    rm_col1, rm_col2 = st.columns([5, 1])
+                    rm_col1.write(f"🎯 {iname}")
+                    if rm_col2.button("✕ Quitar", key=f"rm_interest_{iid}"):
+                        del st.session_state["selected_interests_map"][iid]
+                        st.rerun()
+
+            selected_interest_ids = list(st.session_state["selected_interests_map"].keys())
+
+            # Públicos Lookalike
+            st.markdown("**Públicos Lookalike** (basados en tus clientes o públicos existentes)")
+            lookalikes = fetch_lookalike_audiences(account_id)
+            selected_lookalike_ids = []
+            if lookalikes:
+                lookalike_options = {f"{a['name']}  (~{a['size']:,.0f} personas)": a["id"] for a in lookalikes}
+                chosen_lookalikes = st.multiselect("Selecciona públicos Lookalike:", list(lookalike_options.keys()))
+                selected_lookalike_ids = [lookalike_options[c] for c in chosen_lookalikes]
+            else:
+                st.caption("No se encontraron públicos Lookalike en esta cuenta. Puedes crear uno en Ads Manager → Públicos → Crear público → Lookalike, a partir de tu lista de clientes o de tu página.")
+
+            # Estimado real de audiencia — mide qué tan fina quedó la segmentación
+            if selected_countries:
+                with st.spinner("Calculando tamaño de audiencia..."):
+                    audience_est = get_audience_estimate(
+                        account_id, selected_countries, age_min, age_max, genders, selected_interest_ids
+                    )
+                if audience_est is not None:
+                    if audience_est < 50_000:
+                        st.info(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — muy específica. Bien si buscas precisión, pero vigila que no sea tan chica que limite la entrega.")
+                    elif audience_est < 500_000:
+                        st.success(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — segmentación fina, buen equilibrio entre precisión y alcance.")
+                    else:
+                        st.warning(f"👥 **Audiencia estimada: ~{audience_est:,} personas** — todavía amplia. Agrega más intereses o acorta el rango de edad para afinar más.")
+
+            st.divider()
+
+            # ── PASO 3: Creatividad ───────────────────────────────────────────────────
+            st.subheader("3️⃣  Creatividad del anuncio")
+
+            uploaded_image = st.file_uploader(
+                "Imagen del anuncio * (JPG o PNG — mín. 1080×1080 px recomendado)",
+                type=["jpg", "jpeg", "png"],
+            )
+            if uploaded_image:
+                st.image(uploaded_image, caption="Imagen cargada", width=280)
+
+            cr1, cr2 = st.columns(2)
+            with cr1:
+                primary_text = st.text_area(
+                    "Texto principal *",
+                    placeholder="Ej: ¡Conéctate sin límites con Cuy Móvil! 🐹 Planes desde S/39.",
+                    height=100,
+                )
+                headline = st.text_input("Titular *", placeholder="Ej: Plan Ilimitado desde S/39")
+            with cr2:
+                ad_description = st.text_input("Descripción", placeholder="Ej: Sin cortes, sin límites. Pruébalo gratis 7 días.")
+                destination_url = st.text_input("URL de destino *", placeholder="https://cuymovil.pe")
+                cta_label = st.selectbox("Botón de acción (CTA)", list(CTA_OPTIONS.keys()))
+                cta_type  = CTA_OPTIONS[cta_label]
+
+            # Vista previa del anuncio (usa la API de Meta, no publica nada)
+            st.markdown("**👁️ Vista previa del anuncio**")
+            preview_platform_label = st.radio(
+                "Ver como se vería en:",
+                ["Facebook (feed móvil)", "Instagram (feed)"],
+                horizontal=True,
+            )
+            preview_ad_format = "MOBILE_FEED_STANDARD" if "Facebook" in preview_platform_label else "INSTAGRAM_STANDARD"
+
+            if st.button("🔍 Generar vista previa"):
+                if not uploaded_image or not page_id_input or not destination_url:
+                    st.warning("Sube una imagen, indica el ID de página y la URL de destino antes de generar la vista previa.")
+                else:
+                    with st.spinner("Generando vista previa con Meta..."):
+                        try:
+                            preview_image_bytes = uploaded_image.getvalue()
+                            preview_image_ext = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+                            preview_hash = upload_ad_image(account_id, preview_image_bytes, preview_image_ext)
+                            st.session_state["preview_image_hash"] = preview_hash
+                            preview_html = get_ad_preview_html(
+                                account_id, page_id_input, preview_hash,
+                                primary_text or " ", headline or " ", ad_description or "",
+                                destination_url, cta_type, preview_ad_format,
                             )
-                            st.markdown(f"""
-    **IDs generados:**
-    - 📢 Campaña: `{result['campaign_id']}`
-    - 🎨 Creatividad: `{result['creative_id']}`
-    {adsets_md}
-                            """)
-                        with r2:
-                            mgr_url = f"https://www.facebook.com/adsmanager/manage/campaigns?act={account_id.replace('act_', '')}"
-                            st.markdown(f"### [📋 Ver en Ads Manager]({mgr_url})")
-                            st.info("Cuando estés lista, actívalo desde Ads Manager.")
-                        st.session_state["preview_html"] = None
-                        st.cache_data.clear()
+                            st.session_state["preview_html"] = preview_html
+                        except Exception as e:
+                            st.error(f"No se pudo generar la vista previa: {e}")
 
-                    except Exception as e:
-                        st.error(f"Error al crear el anuncio: {e}")
-                        st.caption("Abre los logs en 'Manage app' para ver el detalle.")
+            if st.session_state.get("preview_html"):
+                st.components.v1.html(st.session_state["preview_html"], height=600, scrolling=True)
 
-    # ══════════════════════════════════════════════════════════════════════════════
-    # TAB 3 — PARRILLA DE CONTENIDO (recomendación mensual basada en datos reales)
-    # ══════════════════════════════════════════════════════════════════════════════
+            st.divider()
+
+            # ── PASO 4: Detalles finales ──────────────────────────────────────────────
+            st.subheader("4️⃣  Detalles finales")
+            d1, d2 = st.columns(2)
+            with d1:
+                start_date = st.date_input("Fecha de inicio", value=date.today())
+            with d2:
+                if differentiate_budget:
+                    resumen_presupuesto = " · ".join(f"{k.capitalize()}: ${v:.2f}/día" for k, v in budget_by_platform.items())
+                else:
+                    resumen_presupuesto = f"${daily_budget_total:.2f}/día ({', '.join(platforms_selected) or 'sin plataforma'})"
+                st.info(f"**Cuenta:** {account_label}\n\n**Presupuesto:** {resumen_presupuesto}")
+
+            st.divider()
+
+            # ── Validación y botón de publicar ────────────────────────────────────────
+            missing = []
+            if not camp_name:          missing.append("Nombre de campaña")
+            if not page_id_input:      missing.append("ID de página de Facebook")
+            if not destination_url:    missing.append("URL de destino")
+            if not primary_text:       missing.append("Texto principal")
+            if not headline:           missing.append("Titular")
+            if not uploaded_image:     missing.append("Imagen del anuncio")
+            if not selected_countries: missing.append("Al menos un país")
+            if not platforms_selected: missing.append("Al menos una plataforma (Facebook o Instagram)")
+
+            if missing:
+                st.warning("Faltan campos requeridos: " + "  ·  ".join(missing))
+                st.button("🚀 Crear anuncio (pausado)", type="primary", disabled=True)
+            else:
+                if st.button("🚀 Crear anuncio (pausado)", type="primary"):
+                    with st.spinner("Creando campaña → conjunto(s) → imagen → creatividad → anuncio(s)…"):
+                        try:
+                            image_bytes = uploaded_image.read()
+                            image_ext   = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+
+                            # Armar la configuración de conjuntos de anuncios por plataforma
+                            if differentiate_budget:
+                                adset_configs = []
+                                if "Facebook" in platforms_selected:
+                                    adset_configs.append({"platforms": ["facebook"], "budget": budget_by_platform["facebook"], "suffix": "FB"})
+                                if "Instagram" in platforms_selected:
+                                    adset_configs.append({"platforms": ["instagram"], "budget": budget_by_platform["instagram"], "suffix": "IG"})
+                            else:
+                                chosen_platform_codes = [PLATFORM_MAP[p] for p in platforms_selected]
+                                adset_configs = [{"platforms": chosen_platform_codes, "budget": daily_budget_total, "suffix": ""}]
+
+                            result = create_full_ad(
+                                account_id=account_id,
+                                page_id=page_id_input,
+                                camp_name=camp_name,
+                                objective=objective,
+                                adset_configs=adset_configs,
+                                countries=selected_countries,
+                                age_min=age_min,
+                                age_max=age_max,
+                                genders=genders,
+                                interest_ids=selected_interest_ids,
+                                custom_audience_ids=selected_lookalike_ids,
+                                image_bytes=image_bytes,
+                                image_ext=image_ext,
+                                primary_text=primary_text,
+                                headline=headline,
+                                ad_description=ad_description,
+                                destination_url=destination_url,
+                                cta_type=cta_type,
+                                start_date=start_date,
+                            )
+
+                            st.success("✅ ¡Anuncio creado exitosamente en estado PAUSADO!")
+                            r1, r2 = st.columns(2)
+                            with r1:
+                                adsets_md = "\n".join(
+                                    f"- 👥 Conjunto ({', '.join(a['platforms'])}, ${a['budget']:.2f}/día): `{a['adset_id']}` → Anuncio: `{a['ad_id']}`"
+                                    for a in result["adsets"]
+                                )
+                                st.markdown(f"""
+        **IDs generados:**
+        - 📢 Campaña: `{result['campaign_id']}`
+        - 🎨 Creatividad: `{result['creative_id']}`
+        {adsets_md}
+                                """)
+                            with r2:
+                                mgr_url = f"https://www.facebook.com/adsmanager/manage/campaigns?act={account_id.replace('act_', '')}"
+                                st.markdown(f"### [📋 Ver en Ads Manager]({mgr_url})")
+                                st.info("Cuando estés lista, actívalo desde Ads Manager.")
+                            st.session_state["preview_html"] = None
+                            st.cache_data.clear()
+
+                        except Exception as e:
+                            st.error(f"Error al crear el anuncio: {e}")
+                            st.caption("Abre los logs en 'Manage app' para ver el detalle.")
+
+        # ══════════════════════════════════════════════════════════════════════════════
+        # TAB 3 — PARRILLA DE CONTENIDO (recomendación mensual basada en datos reales)
+        # ══════════════════════════════════════════════════════════════════════════════
     with tab_grid:
         st.header("🗓️ Parrilla de Contenido del Mes")
         st.caption(
@@ -2289,10 +2348,16 @@ elif nav_section == "📊 Meta Ads":
             "diseñador — basado en el rendimiento real de tu cuenta, sin usar una IA de pago."
         )
 
-        if st.button("🎯 Generar recomendación del mes", type="primary", key="btn_generate_grid"):
+        if not IS_ADMIN:
+            st.info(
+                "🔒 Tu cuenta tiene acceso de solo lectura y no puede generar la parrilla de contenidos. "
+                "Pídele a un administrador que la genere y comparta el CSV contigo."
+            )
+
+        if IS_ADMIN and st.button("🎯 Generar recomendación del mes", type="primary", key="btn_generate_grid"):
             st.session_state["grid_generated"] = True
 
-        if st.session_state.get("grid_generated"):
+        if IS_ADMIN and st.session_state.get("grid_generated"):
             grid_page_id = PAGE_ID or globals().get("page_id_input", "")
             if not grid_page_id:
                 st.warning(
