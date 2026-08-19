@@ -2101,12 +2101,14 @@ elif nav_section == "📊 Meta Ads":
 
             st.divider()
 
-            # Gráficos
-            active_df = apply_platform_filter(df[df["Estado"] == "ACTIVE"], platform_filter)
+            # Gráficos — usa el mismo conjunto de campañas que los KPIs de arriba (respeta el toggle
+            # "Incluir campañas pausadas" y el filtro de plataforma), en vez de forzar solo ACTIVE.
+            active_df = view_df
             if not active_df.empty:
                 g1, g2 = st.columns(2)
                 with g1:
                     st.subheader("Gasto por campaña")
+                    st.caption(f"Mostrando {len(active_df)} de {len(df)} campañas totales de la cuenta.")
                     max_gasto = active_df["Gasto"].max()
                     fig = px.bar(
                         active_df.sort_values("Gasto"),
@@ -2117,7 +2119,7 @@ elif nav_section == "📊 Meta Ads":
                     )
                     fig.update_traces(texttemplate="$%{text:.0f}", textposition="outside", cliponaxis=False)
                     fig.update_layout(
-                        height=380, margin=dict(l=0, r=60, t=0, b=0),
+                        height=max(380, 32 * len(active_df)), margin=dict(l=0, r=60, t=0, b=0),
                         yaxis_title="", coloraxis_showscale=False,
                         xaxis=dict(range=[0, max_gasto * 1.18]),
                     )
