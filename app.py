@@ -882,14 +882,32 @@ def render_domain_top_pages(tp: pd.DataFrame, is_funnel: bool = False, height: i
         st.caption("Sin páginas registradas para este dominio en el período.")
         return
     if is_funnel:
+        n = len(tp)
+        # Medidas fijas en forma de embudo (no proporcionales a los datos reales) para que cada paso
+        # se vea limpio y parejo — los números reales se muestran como texto sobre cada tramo.
+        shape_values = [100 - i * (80 / max(n - 1, 1)) for i in range(n)]
+        total_vistas_top = tp["Vistas"].iloc[0] if tp["Vistas"].iloc[0] else 0
         fig = go.Figure(go.Funnel(
-            y=tp["Página"],
-            x=tp["Vistas"],
-            textinfo="value+percent initial",
-            marker=dict(color=PURPLE_SCALE[:len(tp)] if len(tp) <= len(PURPLE_SCALE) else PURPLE_SCALE),
+            orientation="v",
+            x=[f"{i+1}. {p}" for i, p in enumerate(tp["Página"])],
+            y=shape_values,
+            text=[
+                f"{v:,.0f} vistas<br>({(v/total_vistas_top*100 if total_vistas_top else 0):.0f}%)"
+                for v in tp["Vistas"]
+            ],
+            textposition="inside",
+            textinfo="text",
+            textfont=dict(size=20, color=BRAND["white"]),
+            marker=dict(color=PURPLE_SCALE[:n] if n <= len(PURPLE_SCALE) else PURPLE_SCALE),
             connector=dict(line=dict(color=BRAND["purple_light"], width=1)),
         ))
-        fig.update_layout(height=height + 60, margin=dict(l=0, r=0, t=10, b=0), font=dict(size=12))
+        fig.update_layout(
+            height=height + 140,
+            margin=dict(l=0, r=0, t=10, b=0),
+            font=dict(size=17),
+            xaxis=dict(tickfont=dict(size=15)),
+            showlegend=False,
+        )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.dataframe(
