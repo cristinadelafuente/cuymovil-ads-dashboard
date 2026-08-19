@@ -725,6 +725,15 @@ def init_ga_client():
 # Dominios que reportan a la misma propiedad GA4 — se pueden filtrar por separado
 HOST_OPTIONS = {"Todos los dominios": None, "🐹 cuy.pe": "cuy.pe", "🔒 secure.guinea.pe": "secure.guinea.pe"}
 
+# Pasos del funnel de compra en secure.guinea.pe, en orden (de arriba hacia abajo = pirámide invertida)
+FUNNEL_PAGES_SECURE = [
+    "/cuy/plan",
+    "/cuy/personal-data",
+    "/cuy/address",
+    "/cuy/subscription",
+    "/cuy/successful",
+]
+
 def _ga_host_filter(host_filter: str):
     """Construye un FilterExpression de GA4 para filtrar por hostName exacto, o None si no aplica."""
     if not host_filter:
@@ -821,15 +830,72 @@ def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: 
     } for r in response.rows]
     return pd.DataFrame(rows)
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga_funnel_pages(property_id: str, start_date: str, end_date: str, host_filter: str, pages: list) -> pd.DataFrame:
+    """Trae vistas/usuarios para un conjunto fijo de páginas (embudo), devueltas en el orden dado —
+    pensado para graficarse como pirámide invertida (funnel) en vez de ordenarse por más visitadas."""
+    from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric
+    client = init_ga_client()
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=[Dimension(name="pagePath")],
+        metrics=[Metric(name="screenPageViews"), Metric(name="activeUsers")],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+        limit=100000,
+        dimension_filter=_ga_host_filter(host_filter),
+    )
+    response = client.run_report(request)
+    raw = [{
+        "path": r.dimension_values[0].value or "",
+        "Vistas": float(r.metric_values[0].value),
+        "Usuarios": float(r.metric_values[1].value),
+    } for r in response.rows]
+
+    rows = []
+    for p in pages:
+        vistas   = sum(r["Vistas"] for r in raw if p in r["path"])
+        usuarios = sum(r["Usuarios"] for r in raw if p in r["path"])
+        rows.append({"Página": p, "Vistas": vistas, "Usuarios": usuarios})
+    return pd.DataFrame(rows)
+
 def fetch_ga_by_domain(property_id: str, start_date: str, end_date: str, top_limit: int = 5) -> dict:
-    """Trae el desglose de métricas de Web Analytics separado por dominio (cuy.pe / secure.guinea.pe)."""
+    """Trae el desglose de métricas de Web Analytics separado por dominio (cuy.pe / secure.guinea.pe).
+    Para secure.guinea.pe, las páginas se devuelven como embudo de compra en orden fijo (pirámide invertida)
+    en vez de ordenarse por número de vistas."""
     result = {}
     for host in ["cuy.pe", "secure.guinea.pe"]:
+        if host == "secure.guinea.pe":
+            top_pages = fetch_ga_funnel_pages(property_id, start_date, end_date, host, FUNNEL_PAGES_SECURE)
+        else:
+            top_pages = fetch_ga_top_pages(property_id, start_date, end_date, limit=top_limit, host_filter=host)
         result[host] = {
             "summary":   fetch_ga_summary(property_id, start_date, end_date, host_filter=host),
-            "top_pages": fetch_ga_top_pages(property_id, start_date, end_date, limit=top_limit, host_filter=host),
+            "top_pages": top_pages,
+            "is_funnel": host == "secure.guinea.pe",
         }
     return result
+
+def render_domain_top_pages(tp: pd.DataFrame, is_funnel: bool = False, height: int = 200):
+    """Muestra las páginas top de un dominio. Si es_funnel=True, las grafica como pirámide invertida
+    (funnel de compra) en vez de tabla, siguiendo el orden fijo en el que llegan los datos."""
+    if tp is None or tp.empty or tp["Vistas"].sum() == 0:
+        st.caption("Sin páginas registradas para este dominio en el período.")
+        return
+    if is_funnel:
+        fig = go.Figure(go.Funnel(
+            y=tp["Página"],
+            x=tp["Vistas"],
+            textinfo="value+percent initial",
+            marker=dict(color=PURPLE_SCALE[:len(tp)] if len(tp) <= len(PURPLE_SCALE) else PURPLE_SCALE),
+            connector=dict(line=dict(color=BRAND["purple_light"], width=1)),
+        ))
+        fig.update_layout(height=height + 60, margin=dict(l=0, r=0, t=10, b=0), font=dict(size=12))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.dataframe(
+            tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
+            use_container_width=True, hide_index=True, height=height,
+        )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MICROSOFT CLARITY — Data Export API (10 llamadas/día por proyecto, máx. 3 días)
@@ -970,7 +1036,39 @@ def fetch_google_ads_campaigns(customer_id: str, start_date: str, end_date: str)
 # ══════════════════════════════════════════════════════════════════════════════
 # ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
 # ══════════════════════════════════════════════════════════════════════════════
-def generate_full_analysis(meta_df, ga_summary, ga_channels, ga_top_pages=None) -> str:
+def generate_google_ads_conclusions(gads_df) -> str:
+    """Genera una conclusión narrativa de Google Ads (basada en reglas, sin costo de API)."""
+    if gads_df is None or gads_df.empty:
+        return "**Google Ads:** no hay campañas de Cuy Móvil con datos en el período seleccionado."
+
+    total_spend       = gads_df["Gasto"].sum()
+    total_impressions = gads_df["Impresiones"].sum()
+    total_clicks      = gads_df["Clics"].sum()
+    total_conversions = gads_df["Conversiones"].sum()
+    avg_ctr           = (total_clicks / total_impressions * 100) if total_impressions else 0
+    avg_cpc           = (total_spend / total_clicks) if total_clicks else 0
+
+    lines = [
+        f"**Google Ads:** gastaste **${total_spend:,.2f}** en {len(gads_df)} campaña(s) de Cuy Móvil, "
+        f"generando {total_clicks:,.0f} clics ({avg_ctr:.2f}% CTR promedio, ${avg_cpc:.3f} CPC promedio) "
+        f"y {total_conversions:,.1f} conversiones."
+    ]
+    if len(gads_df) > 1 and gads_df["CTR"].notna().any():
+        best_g  = gads_df.loc[gads_df["CTR"].idxmax()]
+        worst_g = gads_df.loc[gads_df["CTR"].idxmin()]
+        lines.append(
+            f"La campaña de Google Ads con mejor CTR es **{best_g['Campaña']}** ({best_g['CTR']:.2f}%). "
+            f"La de menor CTR es **{worst_g['Campaña']}** ({worst_g['CTR']:.2f}%) — vale la pena revisarla."
+        )
+    if avg_ctr and avg_ctr < 2:
+        lines.append("⚠️ El CTR promedio de Google Ads es bajo (<2%) — revisa la relevancia de los anuncios y las palabras clave/segmentación.")
+    elif avg_ctr and avg_ctr > 5:
+        lines.append("✅ El CTR promedio de Google Ads es alto (>5%), señal de anuncios relevantes para la audiencia.")
+    if total_conversions == 0 and total_clicks > 0:
+        lines.append("⚠️ Hay clics pero ninguna conversión registrada en Google Ads — revisa el seguimiento de conversiones.")
+    return "\n\n".join(lines)
+
+def generate_full_analysis(meta_df, ga_summary, ga_channels, ga_top_pages=None, gads_df=None) -> str:
     """Genera un análisis narrativo combinando Meta Ads y Web Analytics (basado en reglas, sin costo de API)."""
     lines = []
 
@@ -1038,7 +1136,9 @@ def generate_full_analysis(meta_df, ga_summary, ga_channels, ga_top_pages=None) 
     else:
         lines.append("**Web Analytics:** no se pudo cargar información (verifica la cuenta de servicio de Google en Secrets).")
 
-    lines.append("\n_Nota: Google Ads aún no está conectado a este dashboard. Revisa la sección 'Clarity' para señales de frustración de usuarios._")
+    lines.append(generate_google_ads_conclusions(gads_df))
+
+    lines.append("\n_Nota: revisa la sección 'Clarity' para señales de frustración de usuarios._")
     return "\n\n".join(lines)
 
 def answer_question(question: str, meta_df, ga_summary, ga_channels, ga_top_pages=None) -> str:
@@ -1687,6 +1787,7 @@ if nav_section == "📋 Resumen":
     ga_summary_r  = None
     ga_channels_r = None
     ga_top_pages_r = None
+    gads_df_r     = None
 
     if ACCESS_TOKEN:
         try:
@@ -1710,6 +1811,18 @@ if nav_section == "📋 Resumen":
             st.warning(f"No se pudo cargar Google Analytics: {e}")
     else:
         st.info("Google Analytics no está conectado (falta la cuenta de servicio en Secrets).")
+
+    if GOOGLE_ADS_READY:
+        try:
+            gads_start_r, gads_end_r = get_ga_date_range(resumen_date_preset, resumen_since_str, resumen_until_str)
+            with st.spinner("Cargando datos de Google Ads..."):
+                gads_df_r = fetch_google_ads_campaigns(GOOGLE_ADS_CUSTOMER_ID, gads_start_r, gads_end_r)
+                if gads_df_r is not None and not gads_df_r.empty:
+                    gads_df_r = gads_df_r[gads_df_r["Campaña"].str.contains("Cuy", case=False, na=False)]
+        except Exception as e:
+            st.warning(f"No se pudo cargar Google Ads: {e}")
+    else:
+        st.info("Google Ads no está conectado (falta configurar credenciales en Secrets).")
 
     st.divider()
 
@@ -1789,11 +1902,9 @@ if nav_section == "📋 Resumen":
                         m1.metric("👥 Sesiones", f"{s['sessions']:,.0f}")
                         m2.metric("⏱️ Tiempo", f"{s['avg_duration']:.0f}s")
                         m3.metric("↩️ Rebote", f"{s['bounce_rate']:.1f}%")
-                        if tp is not None and not tp.empty:
-                            st.dataframe(
-                                tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
-                                use_container_width=True, hide_index=True, height=180,
-                            )
+                        if host == "secure.guinea.pe":
+                            st.caption("🔻 Funnel de compra (pirámide invertida)")
+                        render_domain_top_pages(tp, is_funnel=ga_by_domain_r[host].get("is_funnel", False), height=180)
                     else:
                         st.info(f"Sin datos para **{host}** en este período.")
     else:
@@ -1803,7 +1914,7 @@ if nav_section == "📋 Resumen":
 
     # Análisis narrativo automático
     st.subheader("🧠 Análisis completo")
-    st.markdown(generate_full_analysis(meta_df_r, ga_summary_r, ga_channels_r, ga_top_pages_r))
+    st.markdown(generate_full_analysis(meta_df_r, ga_summary_r, ga_channels_r, ga_top_pages_r, gads_df_r))
 
     st.divider()
 
@@ -2663,14 +2774,11 @@ elif nav_section == "📈 Web Analytics":
                     m3, m4 = st.columns(2)
                     m3.metric("⏱️ Tiempo en sitio", f"{s['avg_duration']:.0f} s")
                     m4.metric("↩️ Rebote", f"{s['bounce_rate']:.1f}%")
-                    if tp is not None and not tp.empty:
-                        st.caption("Páginas más visitadas")
-                        st.dataframe(
-                            tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
-                            use_container_width=True, hide_index=True, height=200,
-                        )
+                    if host == "secure.guinea.pe":
+                        st.caption("🔻 Funnel de compra (pirámide invertida)")
                     else:
-                        st.caption("Sin páginas registradas para este dominio en el período.")
+                        st.caption("Páginas más visitadas")
+                    render_domain_top_pages(tp, is_funnel=ga_by_domain[host].get("is_funnel", False), height=200)
                 else:
                     st.info(f"Sin datos para **{host}** en este período.")
 
