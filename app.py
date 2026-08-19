@@ -930,46 +930,54 @@ def fetch_ga_by_domain(property_id: str, start_date: str, end_date: str, top_lim
         }
     return result
 
+def render_funnel_boxes(tp: pd.DataFrame, value_col: str, unit_label: str):
+    """Dibuja el embudo de pasos como recuadros con flechas (pirámide invertida), usando la columna
+    de valor indicada (p.ej. 'Vistas' o 'Usuarios') — mismo diseño visual para cualquier métrica."""
+    n = len(tp)
+    total_top = tp[value_col].iloc[0] if tp[value_col].iloc[0] else 0
+    # Degradado dentro del rango oscuro/medio de morado de marca — siempre con buen contraste
+    # para texto blanco (nunca cae en tonos pálidos como el primer/segundo color de PURPLE_SCALE).
+    colors = [_lerp_color(BRAND["purple_darker"], BRAND["purple"], i / max(n - 1, 1)) for i in range(n)]
+
+    cells = []
+    for i, (_, row) in enumerate(tp.iterrows()):
+        pct = (row[value_col] / total_top * 100) if total_top else 0
+        cells.append(
+            f'<div style="flex:1 1 0;min-width:130px;background:{colors[i]};border-radius:14px;'
+            f'padding:16px 12px;text-align:center;color:#FFFFFF;'
+            f'box-shadow:0 2px 6px rgba(21,12,84,0.25);">'
+            f'<div style="font-size:13px;font-weight:600;letter-spacing:.03em;opacity:.85;margin-bottom:6px;">'
+            f'PASO {i + 1}</div>'
+            f'<div style="font-size:16px;font-weight:700;margin-bottom:10px;word-break:break-word;">'
+            f'{row["Página"]}</div>'
+            f'<div style="font-size:24px;font-weight:800;line-height:1.1;">{row[value_col]:,.0f}</div>'
+            f'<div style="font-size:13px;opacity:.9;margin-top:2px;">{unit_label} · {pct:.0f}% del paso 1</div>'
+            f'</div>'
+        )
+        if i < n - 1:
+            cells.append(
+                f'<div style="display:flex;align-items:center;justify-content:center;flex:0 0 auto;'
+                f'font-size:30px;font-weight:700;color:{BRAND["lemon_dark"]};padding:0 2px;">&#10132;</div>'
+            )
+
+    html = (
+        '<div style="display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;margin-bottom:8px;">'
+        + "".join(cells) +
+        '</div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
 def render_domain_top_pages(tp: pd.DataFrame, is_funnel: bool = False, height: int = 200):
     """Muestra las páginas top de un dominio. Si es_funnel=True, las grafica como pirámide invertida
-    (funnel de compra) en vez de tabla, siguiendo el orden fijo en el que llegan los datos."""
+    (funnel de compra) en vez de tabla, siguiendo el orden fijo en el que llegan los datos —
+    primero con vistas totales y luego con usuarios únicos por paso."""
     if tp is None or tp.empty or tp["Vistas"].sum() == 0:
         st.caption("Sin páginas registradas para este dominio en el período.")
         return
     if is_funnel:
-        n = len(tp)
-        total_vistas_top = tp["Vistas"].iloc[0] if tp["Vistas"].iloc[0] else 0
-        # Degradado dentro del rango oscuro/medio de morado de marca — siempre con buen contraste
-        # para texto blanco (nunca cae en tonos pálidos como el primer/segundo color de PURPLE_SCALE).
-        colors = [_lerp_color(BRAND["purple_darker"], BRAND["purple"], i / max(n - 1, 1)) for i in range(n)]
-
-        cells = []
-        for i, (_, row) in enumerate(tp.iterrows()):
-            pct = (row["Vistas"] / total_vistas_top * 100) if total_vistas_top else 0
-            cells.append(
-                f'<div style="flex:1 1 0;min-width:130px;background:{colors[i]};border-radius:14px;'
-                f'padding:16px 12px;text-align:center;color:#FFFFFF;'
-                f'box-shadow:0 2px 6px rgba(21,12,84,0.25);">'
-                f'<div style="font-size:13px;font-weight:600;letter-spacing:.03em;opacity:.85;margin-bottom:6px;">'
-                f'PASO {i + 1}</div>'
-                f'<div style="font-size:16px;font-weight:700;margin-bottom:10px;word-break:break-word;">'
-                f'{row["Página"]}</div>'
-                f'<div style="font-size:24px;font-weight:800;line-height:1.1;">{row["Vistas"]:,.0f}</div>'
-                f'<div style="font-size:13px;opacity:.9;margin-top:2px;">vistas · {pct:.0f}% del paso 1</div>'
-                f'</div>'
-            )
-            if i < n - 1:
-                cells.append(
-                    f'<div style="display:flex;align-items:center;justify-content:center;flex:0 0 auto;'
-                    f'font-size:30px;font-weight:700;color:{BRAND["lemon_dark"]};padding:0 2px;">&#10132;</div>'
-                )
-
-        html = (
-            '<div style="display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;margin-bottom:8px;">'
-            + "".join(cells) +
-            '</div>'
-        )
-        st.markdown(html, unsafe_allow_html=True)
+        render_funnel_boxes(tp, "Vistas", "vistas")
+        st.caption("👤 Usuarios únicos por paso")
+        render_funnel_boxes(tp, "Usuarios", "usuarios únicos")
     else:
         st.dataframe(
             tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
