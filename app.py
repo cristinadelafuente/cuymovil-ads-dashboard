@@ -366,6 +366,35 @@ def fetch_learning_status(account_id: str) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
+def _learning_action_plan(freq: float = None, ctr: float = None, spend: float = None) -> list:
+    """Checklist genérico de causas/soluciones típicas cuando un conjunto de anuncios no logra salir
+    (o le cuesta salir) de la fase de aprendizaje de Meta."""
+    tips = [
+        "**Muy pocos eventos de optimización:** Meta recomienda ~50 conversiones (u otro evento de "
+        "optimización) por conjunto de anuncios en 7 días. Si tu campaña opera por conjuntos separados en "
+        "FB e IG, intenta consolidarlos en un solo conjunto (Advantage+ / mismo conjunto, ambas plataformas) "
+        "para acumular eventos más rápido en vez de dividirlos.",
+        "**Ediciones frecuentes:** cambiar presupuesto, creativo, público o puja mientras está en aprendizaje "
+        "reinicia el conteo. Evita tocarla por al menos 3-4 días o hasta acumular eventos suficientes.",
+        "**Segmentación muy angosta:** si el público es muy chico o muy específico, hay pocas oportunidades "
+        "de conversión. Prueba ampliar edad/intereses o usar una audiencia Advantage+ (menos restrictiva).",
+        "**Evento de optimización muy 'profundo' (ej. compra) y poco frecuente:** si tarda en acumular compras, "
+        "prueba optimizar temporalmente por un evento más alto en el funnel (ej. 'Agregar al carrito' o "
+        "'Iniciar checkout') para salir del aprendizaje más rápido, y luego evalúa volver a 'Compra'.",
+        "**Presupuesto muy bajo para el costo por resultado de tu nicho:** si el presupuesto diario no alcanza "
+        "para generar suficientes eventos, sube el presupuesto (en incrementos de 20-50%, no de golpe).",
+        "**Puja restrictiva (costo tope / puja manual):** si usas 'costo tope' o puja manual muy ajustada, Meta "
+        "tiene menos flexibilidad para encontrar resultados. Prueba con 'Menor costo' (sin tope) durante el aprendizaje.",
+    ]
+    tailored = []
+    if freq is not None and freq > 3:
+        tailored.append(f"En tu caso la frecuencia ya está en {freq:.1f}x — la audiencia se está agotando, lo que reduce las probabilidades de nuevas conversiones. Amplía audiencia o rota creativo.")
+    if ctr is not None and ctr < 1.5:
+        tailored.append(f"Tu CTR actual ({ctr:.2f}%) es bajo — si pocas personas hacen clic, es más difícil acumular los eventos necesarios para salir del aprendizaje. Revisa creativo/copy antes de tocar presupuesto.")
+    if spend is not None and spend < 50:
+        tailored.append(f"El gasto acumulado (${spend:,.2f}) es bajo para el período — puede que el presupuesto no esté generando suficiente volumen de eventos.")
+    return tailored + tips
+
 def generate_meta_ai_answer(question: str, view_df: pd.DataFrame, learning_df: pd.DataFrame) -> str:
     """Responde preguntas sobre las campañas de Meta Ads y da recomendaciones — basado en reglas
     (sin costo de API), usando los mismos datos que ya se muestran en el dashboard."""
@@ -374,9 +403,53 @@ def generate_meta_ai_answer(question: str, view_df: pd.DataFrame, learning_df: p
 
     has_meta   = view_df is not None and not view_df.empty
     has_learn  = learning_df is not None and not learning_df.empty
+    mentions_learning = any(k in q for k in ["aprendizaje", "learning", "fase"])
 
-    # ── Fase de aprendizaje ────────────────────────────────────────────────────
-    if any(k in q for k in ["aprendizaje", "learning", "fase"]):
+    # ── Campaña específica mencionada por nombre (se revisa PRIMERO, incluso si la pregunta
+    # también menciona "aprendizaje" — así respondemos sobre ESA campaña, no sobre toda la cuenta) ──
+    matched = pd.DataFrame()
+    if has_meta:
+        matched = view_df[view_df["Campaña"].str.lower().apply(lambda n: n in q or q in n)]
+
+    if not matched.empty:
+        r = matched.iloc[0]
+        lines.append(
+            f"**{r['Campaña']}** ({r['Estado']}): gasto ${r['Gasto']:,.2f}, CTR {r['CTR']:.2f}%, "
+            f"CPC ${r['CPC']:.3f}, frecuencia {r['Frecuencia']:.1f}x, presupuesto diario ${r['Presupuesto']:.2f}."
+        )
+
+        # Si tenemos datos de aprendizaje, muestra los conjuntos de anuncios de ESTA campaña
+        learn_rows = pd.DataFrame()
+        if has_learn:
+            learn_rows = learning_df[learning_df["Campaña"].str.lower() == str(r["Campaña"]).lower()]
+            if not learn_rows.empty:
+                lines.append(f"Conjuntos de anuncios de esta campaña ({len(learn_rows)}):")
+                for _, lr in learn_rows.iterrows():
+                    lines.append(f"- **{lr['Conjunto de anuncios']}** — {lr['Fase (texto)']} (presupuesto diario ${lr['Presupuesto diario']:.2f})")
+
+        if mentions_learning:
+            if not learn_rows.empty and (learn_rows["Fase"] == "LEARNING_LIMITED").any():
+                lines.append("⚠️ Al menos un conjunto está en **aprendizaje limitado** — es poco probable que salga sin cambios.")
+            elif has_learn and learn_rows.empty:
+                lines.append(
+                    "No encontré datos de fase de aprendizaje para esta campaña específica en la API "
+                    "(puede que Meta no esté devolviendo `learning_stage_info` para sus conjuntos de anuncios "
+                    "en este momento, lo cual pasa a veces incluso cuando la campaña sigue sin salir del aprendizaje)."
+                )
+            lines.append("**Plan de acción para salir del aprendizaje:**")
+            for tip in _learning_action_plan(freq=r["Frecuencia"], ctr=r["CTR"], spend=r["Gasto"]):
+                lines.append(f"- {tip}")
+        else:
+            if r["Frecuencia"] > 4:
+                lines.append("⚠️ Frecuencia alta — la misma audiencia ya vio el anuncio muchas veces. Conviene rotar la creatividad o ampliar audiencia.")
+            if r["CTR"] < 3:
+                lines.append("⚠️ CTR bajo — revisa creatividad, copy o segmentación.")
+            elif r["CTR"] > 5:
+                lines.append("✅ CTR sólido — es candidata a escalar presupuesto gradualmente (+20-50%, no de golpe).")
+        return "\n\n".join(lines)
+
+    # ── Fase de aprendizaje (pregunta general, sin campaña específica) ─────────
+    if mentions_learning:
         if not has_learn:
             return (
                 "No pude traer la fase de aprendizaje de tus conjuntos de anuncios (puede que la cuenta "
@@ -385,49 +458,36 @@ def generate_meta_ai_answer(question: str, view_df: pd.DataFrame, learning_df: p
         en_aprendizaje = learning_df[learning_df["Fase"] == "LEARNING"]
         limitado       = learning_df[learning_df["Fase"] == "LEARNING_LIMITED"]
         completado     = learning_df[learning_df["Fase"] == "SUCCESS"]
+        sin_dato       = learning_df[~learning_df["Fase"].isin(["LEARNING", "LEARNING_LIMITED", "SUCCESS"])]
 
         lines.append(
             f"De {len(learning_df)} conjunto(s) de anuncios activos/pausados: "
             f"**{len(en_aprendizaje)} en aprendizaje**, **{len(limitado)} en aprendizaje limitado**, "
-            f"**{len(completado)} ya salieron del aprendizaje**."
+            f"**{len(completado)} ya salieron del aprendizaje**"
+            + (f", **{len(sin_dato)} sin dato de fase** (Meta no devolvió `learning_stage_info` para ellos)." if not sin_dato.empty else ".")
         )
         if not limitado.empty:
             lines.append("⚠️ **Aprendizaje limitado** (es poco probable que salgan del aprendizaje sin cambios):")
             for _, r in limitado.iterrows():
                 lines.append(f"- **{r['Conjunto de anuncios']}** (campaña: {r['Campaña']}) — presupuesto diario ${r['Presupuesto diario']:.2f}")
-            lines.append(
-                "Recomendación: sube el presupuesto diario, amplía la segmentación (menos restrictiva), "
-                "o consolida en menos conjuntos de anuncios para acumular más eventos de conversión por semana. "
-                "Evita editarlos seguido — cada edición relevante reinicia el aprendizaje."
-            )
         if not en_aprendizaje.empty:
             lines.append(
                 f"Los {len(en_aprendizaje)} conjunto(s) en aprendizaje necesitan generalmente **~50 eventos de "
                 "optimización en 7 días** para salir. Evita pausar, editar el presupuesto o el targeting mientras "
                 "estén en esta fase — cada cambio importante reinicia el contador."
             )
-        if en_aprendizaje.empty and limitado.empty and not completado.empty:
+        if en_aprendizaje.empty and limitado.empty and not completado.empty and sin_dato.empty:
             lines.append("✅ Todos tus conjuntos de anuncios ya salieron de la fase de aprendizaje.")
+        if not sin_dato.empty and en_aprendizaje.empty and limitado.empty:
+            lines.append(
+                "Ninguno de tus conjuntos tiene actualmente un estado de aprendizaje reportado por la API — "
+                "esto es normal si llevan tiempo sin cambios recientes, o si el volumen de eventos es bajo. "
+                "Si una campaña en particular no te está dando resultados, dime su nombre y la reviso con más detalle."
+            )
         return "\n\n".join(lines)
 
     if not has_meta:
         return "No hay datos de Meta Ads cargados en este momento para responder tu pregunta."
-
-    # ── Campaña específica mencionada por nombre ───────────────────────────────
-    matched = view_df[view_df["Campaña"].str.lower().apply(lambda n: n in q or q in n.lower())]
-    if not matched.empty:
-        r = matched.iloc[0]
-        lines.append(
-            f"**{r['Campaña']}** ({r['Estado']}): gasto ${r['Gasto']:,.2f}, CTR {r['CTR']:.2f}%, "
-            f"CPC ${r['CPC']:.3f}, frecuencia {r['Frecuencia']:.1f}x, presupuesto diario ${r['Presupuesto']:.2f}."
-        )
-        if r["Frecuencia"] > 4:
-            lines.append("⚠️ Frecuencia alta — la misma audiencia ya vio el anuncio muchas veces. Conviene rotar la creatividad o ampliar audiencia.")
-        if r["CTR"] < 3:
-            lines.append("⚠️ CTR bajo — revisa creatividad, copy o segmentación.")
-        elif r["CTR"] > 5:
-            lines.append("✅ CTR sólido — es candidata a escalar presupuesto gradualmente (+20-50%, no de golpe).")
-        return "\n\n".join(lines)
 
     # ── Pausar / bajo rendimiento ───────────────────────────────────────────────
     if any(k in q for k in ["pausar", "pause", "bajo rendimiento", "mal", "detener"]):
