@@ -822,6 +822,48 @@ def fetch_ga_channels(property_id: str, start_date: str, end_date: str, host_fil
     return pd.DataFrame(rows)
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga_traffic_origin(property_id: str, start_date: str, end_date: str, host_filter: str = None, limit: int = 12) -> pd.DataFrame:
+    """Trae el origen (fuente/medio) de las sesiones que llegan a un dominio — ej. 'cuy.pe / referral',
+    'blog.cuy.pe / referral', 'facebook / paid social', 'google / cpc', '(direct) / (none)'."""
+    from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
+    client = init_ga_client()
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=[Dimension(name="sessionSourceMedium")],
+        metrics=[Metric(name="sessions"), Metric(name="activeUsers")],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
+        limit=limit,
+        dimension_filter=_ga_host_filter(host_filter),
+    )
+    response = client.run_report(request)
+    rows = [{
+        "Origen": r.dimension_values[0].value or "(sin asignar)",
+        "Sesiones": float(r.metric_values[0].value),
+        "Usuarios": float(r.metric_values[1].value),
+    } for r in response.rows]
+    return pd.DataFrame(rows)
+
+def _traffic_origin_icon(origen: str) -> str:
+    """Asigna un ícono según el origen del tráfico (Ads pagado, sitios propios de Cuy, orgánico, directo, etc.)."""
+    o = origen.lower()
+    if any(k in o for k in ["cpc", "ppc", "paid"]):
+        return "📣"
+    if "cuy.pe" in o and "blog" not in o:
+        return "🐹"
+    if "blog.cuy.pe" in o:
+        return "📝"
+    if "referral" in o:
+        return "🔗"
+    if "organic" in o:
+        return "🌱"
+    if "(direct)" in o or "none" in o:
+        return "➡️"
+    if any(k in o for k in ["facebook", "instagram", "ig", "fb"]):
+        return "📱"
+    return "🌐"
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ga_top_pages(property_id: str, start_date: str, end_date: str, limit: int = 10, host_filter: str = None) -> pd.DataFrame:
     from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
     client = init_ga_client()
@@ -881,9 +923,10 @@ def fetch_ga_by_domain(property_id: str, start_date: str, end_date: str, top_lim
         else:
             top_pages = fetch_ga_top_pages(property_id, start_date, end_date, limit=top_limit, host_filter=host)
         result[host] = {
-            "summary":   fetch_ga_summary(property_id, start_date, end_date, host_filter=host),
-            "top_pages": top_pages,
-            "is_funnel": host == "secure.guinea.pe",
+            "summary":       fetch_ga_summary(property_id, start_date, end_date, host_filter=host),
+            "top_pages":     top_pages,
+            "is_funnel":     host == "secure.guinea.pe",
+            "traffic_origin": fetch_ga_traffic_origin(property_id, start_date, end_date, host_filter=host),
         }
     return result
 
@@ -932,6 +975,27 @@ def render_domain_top_pages(tp: pd.DataFrame, is_funnel: bool = False, height: i
             tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
             use_container_width=True, hide_index=True, height=height,
         )
+
+def render_traffic_origin(origin_df: pd.DataFrame, height: int = 260):
+    """Grafica de dónde vienen las sesiones (Ads, cuy.pe, blog.cuy.pe, orgánico, directo, etc.)."""
+    if origin_df is None or origin_df.empty or origin_df["Sesiones"].sum() == 0:
+        st.caption("Sin datos de origen de tráfico para este período.")
+        return
+    df = origin_df.copy()
+    df["Etiqueta"] = df.apply(lambda r: f"{_traffic_origin_icon(r['Origen'])} {r['Origen']}", axis=1)
+    df = df.sort_values("Sesiones")
+    max_sesiones = df["Sesiones"].max()
+    fig = px.bar(
+        df, x="Sesiones", y="Etiqueta", orientation="h",
+        color="Sesiones", color_continuous_scale=PURPLE_SCALE, text="Sesiones",
+    )
+    fig.update_traces(texttemplate="%{text:.0f}", textposition="outside", cliponaxis=False)
+    fig.update_layout(
+        height=height, margin=dict(l=0, r=60, t=0, b=0), yaxis_title="", xaxis_title="Sesiones",
+        xaxis=dict(range=[0, max_sesiones * 1.2]), coloraxis_showscale=False,
+        font=dict(size=13),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MICROSOFT CLARITY — Data Export API (10 llamadas/día por proyecto, máx. 3 días)
@@ -1943,6 +2007,11 @@ if nav_section == "📋 Resumen":
                         render_domain_top_pages(tp, is_funnel=ga_by_domain_r[host].get("is_funnel", False), height=180)
                     else:
                         st.info(f"Sin datos para **{host}** en este período.")
+
+            if ga_by_domain_r["secure.guinea.pe"].get("summary") and ga_by_domain_r["secure.guinea.pe"]["summary"]["sessions"]:
+                st.markdown("**🔒 ¿De dónde llegan las visitas a secure.guinea.pe?**")
+                st.caption("Fuente/medio de la sesión: Ads pagados, cuy.pe, blog.cuy.pe, orgánico, directo, etc.")
+                render_traffic_origin(ga_by_domain_r["secure.guinea.pe"].get("traffic_origin"))
     else:
         st.info("Google Analytics no está conectado.")
 
@@ -2817,6 +2886,11 @@ elif nav_section == "📈 Web Analytics":
                     render_domain_top_pages(tp, is_funnel=ga_by_domain[host].get("is_funnel", False), height=200)
                 else:
                     st.info(f"Sin datos para **{host}** en este período.")
+
+        if ga_by_domain["secure.guinea.pe"].get("summary") and ga_by_domain["secure.guinea.pe"]["summary"]["sessions"]:
+            st.markdown("**🔒 ¿De dónde llegan las visitas a secure.guinea.pe?**")
+            st.caption("Fuente/medio de la sesión: Ads pagados, cuy.pe, blog.cuy.pe, orgánico, directo, etc.")
+            render_traffic_origin(ga_by_domain["secure.guinea.pe"].get("traffic_origin"))
 
 else:  # 🖱️ Clarity
     st.header("🖱️ Microsoft Clarity")
