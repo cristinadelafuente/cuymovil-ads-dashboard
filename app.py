@@ -903,33 +903,29 @@ def render_domain_top_pages(tp: pd.DataFrame, is_funnel: bool = False, height: i
         cells = []
         for i, (_, row) in enumerate(tp.iterrows()):
             pct = (row["Vistas"] / total_vistas_top * 100) if total_vistas_top else 0
-            cells.append(f"""
-            <div style="flex:1 1 0; min-width:130px; background:{colors[i]}; border-radius:14px;
-                        padding:16px 12px; text-align:center; color:#FFFFFF;
-                        box-shadow:0 2px 6px rgba(21,12,84,0.25);">
-                <div style="font-size:13px; font-weight:600; letter-spacing:.03em; opacity:.85; margin-bottom:6px;">
-                    PASO {i + 1}
-                </div>
-                <div style="font-size:16px; font-weight:700; margin-bottom:10px; word-break:break-word;">
-                    {row['Página']}
-                </div>
-                <div style="font-size:24px; font-weight:800; line-height:1.1;">{row['Vistas']:,.0f}</div>
-                <div style="font-size:13px; opacity:.9; margin-top:2px;">vistas · {pct:.0f}% del paso 1</div>
-            </div>
-            """)
+            cells.append(
+                f'<div style="flex:1 1 0;min-width:130px;background:{colors[i]};border-radius:14px;'
+                f'padding:16px 12px;text-align:center;color:#FFFFFF;'
+                f'box-shadow:0 2px 6px rgba(21,12,84,0.25);">'
+                f'<div style="font-size:13px;font-weight:600;letter-spacing:.03em;opacity:.85;margin-bottom:6px;">'
+                f'PASO {i + 1}</div>'
+                f'<div style="font-size:16px;font-weight:700;margin-bottom:10px;word-break:break-word;">'
+                f'{row["Página"]}</div>'
+                f'<div style="font-size:24px;font-weight:800;line-height:1.1;">{row["Vistas"]:,.0f}</div>'
+                f'<div style="font-size:13px;opacity:.9;margin-top:2px;">vistas · {pct:.0f}% del paso 1</div>'
+                f'</div>'
+            )
             if i < n - 1:
-                cells.append(f"""
-                <div style="display:flex; align-items:center; justify-content:center; flex:0 0 auto;
-                            font-size:30px; font-weight:700; color:{BRAND['lemon_dark']}; padding:0 2px;">
-                    &#10132;
-                </div>
-                """)
+                cells.append(
+                    f'<div style="display:flex;align-items:center;justify-content:center;flex:0 0 auto;'
+                    f'font-size:30px;font-weight:700;color:{BRAND["lemon_dark"]};padding:0 2px;">&#10132;</div>'
+                )
 
-        html = f"""
-        <div style="display:flex; align-items:stretch; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
-            {''.join(cells)}
-        </div>
-        """
+        html = (
+            '<div style="display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;margin-bottom:8px;">'
+            + "".join(cells) +
+            '</div>'
+        )
         st.markdown(html, unsafe_allow_html=True)
     else:
         st.dataframe(
