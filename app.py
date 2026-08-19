@@ -331,6 +331,162 @@ def set_daily_budget(campaign_id: str, budget_usd: float):
     init_api()
     Campaign(campaign_id).api_update(fields=[], params={"daily_budget": str(int(budget_usd * 100))})
 
+LEARNING_STAGE_LABELS = {
+    "LEARNING":         "🧪 En aprendizaje",
+    "LEARNING_LIMITED": "⚠️ Aprendizaje limitado",
+    "SUCCESS":          "✅ Aprendizaje completado",
+}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_learning_status(account_id: str) -> pd.DataFrame:
+    """Trae la fase de aprendizaje de cada conjunto de anuncios (ad set) activo/pausado de la cuenta,
+    usando el campo learning_stage_info de la API de Meta."""
+    init_api()
+    account = AdAccount(account_id)
+    campaigns = account.get_campaigns(fields=["id", "name"])
+    campaign_names = {c["id"]: c.get("name", "") for c in campaigns}
+
+    adsets = account.get_ad_sets(fields=[
+        "id", "name", "campaign_id", "effective_status", "learning_stage_info", "daily_budget",
+    ])
+    rows = []
+    for a in adsets:
+        status = a.get("effective_status", "")
+        if status not in ("ACTIVE", "PAUSED"):
+            continue
+        info = a.get("learning_stage_info") or {}
+        stage = info.get("status", "") if isinstance(info, dict) else ""
+        rows.append({
+            "Conjunto de anuncios": a.get("name", ""),
+            "Campaña":              campaign_names.get(a.get("campaign_id", ""), a.get("campaign_id", "")),
+            "Estado":                status,
+            "Fase":                  stage,
+            "Fase (texto)":          LEARNING_STAGE_LABELS.get(stage, "— (sin datos de aprendizaje)"),
+            "Presupuesto diario":    (int(a.get("daily_budget", 0)) / 100) if a.get("daily_budget") else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+def generate_meta_ai_answer(question: str, view_df: pd.DataFrame, learning_df: pd.DataFrame) -> str:
+    """Responde preguntas sobre las campañas de Meta Ads y da recomendaciones — basado en reglas
+    (sin costo de API), usando los mismos datos que ya se muestran en el dashboard."""
+    q = question.lower()
+    lines = []
+
+    has_meta   = view_df is not None and not view_df.empty
+    has_learn  = learning_df is not None and not learning_df.empty
+
+    # ── Fase de aprendizaje ────────────────────────────────────────────────────
+    if any(k in q for k in ["aprendizaje", "learning", "fase"]):
+        if not has_learn:
+            return (
+                "No pude traer la fase de aprendizaje de tus conjuntos de anuncios (puede que la cuenta "
+                "no tenga permisos para el campo `learning_stage_info`, o que no haya conjuntos activos/pausados)."
+            )
+        en_aprendizaje = learning_df[learning_df["Fase"] == "LEARNING"]
+        limitado       = learning_df[learning_df["Fase"] == "LEARNING_LIMITED"]
+        completado     = learning_df[learning_df["Fase"] == "SUCCESS"]
+
+        lines.append(
+            f"De {len(learning_df)} conjunto(s) de anuncios activos/pausados: "
+            f"**{len(en_aprendizaje)} en aprendizaje**, **{len(limitado)} en aprendizaje limitado**, "
+            f"**{len(completado)} ya salieron del aprendizaje**."
+        )
+        if not limitado.empty:
+            lines.append("⚠️ **Aprendizaje limitado** (es poco probable que salgan del aprendizaje sin cambios):")
+            for _, r in limitado.iterrows():
+                lines.append(f"- **{r['Conjunto de anuncios']}** (campaña: {r['Campaña']}) — presupuesto diario ${r['Presupuesto diario']:.2f}")
+            lines.append(
+                "Recomendación: sube el presupuesto diario, amplía la segmentación (menos restrictiva), "
+                "o consolida en menos conjuntos de anuncios para acumular más eventos de conversión por semana. "
+                "Evita editarlos seguido — cada edición relevante reinicia el aprendizaje."
+            )
+        if not en_aprendizaje.empty:
+            lines.append(
+                f"Los {len(en_aprendizaje)} conjunto(s) en aprendizaje necesitan generalmente **~50 eventos de "
+                "optimización en 7 días** para salir. Evita pausar, editar el presupuesto o el targeting mientras "
+                "estén en esta fase — cada cambio importante reinicia el contador."
+            )
+        if en_aprendizaje.empty and limitado.empty and not completado.empty:
+            lines.append("✅ Todos tus conjuntos de anuncios ya salieron de la fase de aprendizaje.")
+        return "\n\n".join(lines)
+
+    if not has_meta:
+        return "No hay datos de Meta Ads cargados en este momento para responder tu pregunta."
+
+    # ── Campaña específica mencionada por nombre ───────────────────────────────
+    matched = view_df[view_df["Campaña"].str.lower().apply(lambda n: n in q or q in n.lower())]
+    if not matched.empty:
+        r = matched.iloc[0]
+        lines.append(
+            f"**{r['Campaña']}** ({r['Estado']}): gasto ${r['Gasto']:,.2f}, CTR {r['CTR']:.2f}%, "
+            f"CPC ${r['CPC']:.3f}, frecuencia {r['Frecuencia']:.1f}x, presupuesto diario ${r['Presupuesto']:.2f}."
+        )
+        if r["Frecuencia"] > 4:
+            lines.append("⚠️ Frecuencia alta — la misma audiencia ya vio el anuncio muchas veces. Conviene rotar la creatividad o ampliar audiencia.")
+        if r["CTR"] < 3:
+            lines.append("⚠️ CTR bajo — revisa creatividad, copy o segmentación.")
+        elif r["CTR"] > 5:
+            lines.append("✅ CTR sólido — es candidata a escalar presupuesto gradualmente (+20-50%, no de golpe).")
+        return "\n\n".join(lines)
+
+    # ── Pausar / bajo rendimiento ───────────────────────────────────────────────
+    if any(k in q for k in ["pausar", "pause", "bajo rendimiento", "mal", "detener"]):
+        malas = view_df[(view_df["CTR"] < 3) | (view_df["Frecuencia"] > 4)]
+        if malas.empty:
+            return "No encuentro campañas con señales claras de bajo rendimiento (CTR < 3% o frecuencia > 4x) en el período actual."
+        lines.append("Candidatas a pausar o ajustar:")
+        for _, r in malas.iterrows():
+            motivo = "frecuencia alta" if r["Frecuencia"] > 4 else "CTR bajo"
+            lines.append(f"- **{r['Campaña']}** — {motivo} (CTR {r['CTR']:.2f}%, frecuencia {r['Frecuencia']:.1f}x, gasto ${r['Gasto']:,.2f})")
+        return "\n\n".join(lines)
+
+    # ── Frecuencia ───────────────────────────────────────────────────────────────
+    if "frecuencia" in q:
+        alta = view_df[view_df["Frecuencia"] > 4].sort_values("Frecuencia", ascending=False)
+        if alta.empty:
+            return "Ninguna campaña supera una frecuencia de 4x — no hay señales de fatiga de anuncio por ahora."
+        lines.append("Campañas con frecuencia alta (fatiga de audiencia):")
+        for _, r in alta.iterrows():
+            lines.append(f"- **{r['Campaña']}**: {r['Frecuencia']:.1f}x")
+        lines.append("Recomendación: rota las creatividades o amplía la audiencia para bajar la frecuencia.")
+        return "\n\n".join(lines)
+
+    # ── Presupuesto ────────────────────────────────────────────────────────────
+    if any(k in q for k in ["presupuesto", "budget", "escalar", "aumentar", "subir gasto"]):
+        buenas = view_df[(view_df["CTR"] > 5) & (view_df["Gasto"] < 200)]
+        if buenas.empty:
+            return "No encuentro campañas con CTR alto (>5%) y gasto bajo (<$200) que sean candidatas claras a escalar presupuesto ahora mismo."
+        lines.append("Candidatas a subir presupuesto (buen CTR, gasto todavía bajo):")
+        for _, r in buenas.iterrows():
+            lines.append(f"- **{r['Campaña']}**: CTR {r['CTR']:.2f}%, gasto actual ${r['Gasto']:,.2f}, presupuesto diario ${r['Presupuesto']:.2f}")
+        lines.append("Sugerencia: sube el presupuesto en incrementos de 20-50% cada pocos días, no de golpe, para no reiniciar el aprendizaje.")
+        return "\n\n".join(lines)
+
+    # ── CTR general ────────────────────────────────────────────────────────────
+    if "ctr" in q:
+        best  = view_df.loc[view_df["CTR"].idxmax()]
+        worst = view_df.loc[view_df["CTR"].idxmin()]
+        return (
+            f"La campaña con mejor CTR es **{best['Campaña']}** ({best['CTR']:.2f}%). "
+            f"La de menor CTR es **{worst['Campaña']}** ({worst['CTR']:.2f}%) — revisa creatividad o segmentación ahí."
+        )
+
+    # ── Fallback: recomendaciones generales ────────────────────────────────────
+    suggestions = get_suggestions(view_df)
+    if not suggestions:
+        lines.append("✅ No encuentro alertas urgentes en tus campañas con los datos actuales.")
+    else:
+        lines.append("Recomendaciones generales según tus datos actuales:")
+        for s in suggestions:
+            lines.append(f"- **{s['campaign_name']}** ({s['urgency']}): {s['reason']}")
+    if has_learn and not learning_df[learning_df["Fase"] == "LEARNING_LIMITED"].empty:
+        lines.append("⚠️ También tienes conjuntos de anuncios en **aprendizaje limitado** — pregúntame por 'aprendizaje' para más detalle.")
+    lines.append(
+        "\n_Puedes preguntarme cosas como: '¿qué campañas están en aprendizaje?', '¿qué debería pausar?', "
+        "'¿cómo está mi frecuencia?', '¿cuáles puedo escalar de presupuesto?' o el nombre de una campaña específica._"
+    )
+    return "\n\n".join(lines)
+
 # ── Análisis con reglas ───────────────────────────────────────────────────────
 def get_suggestions(df: pd.DataFrame) -> list:
     suggestions = []
@@ -2051,7 +2207,9 @@ elif nav_section == "📊 Meta Ads":
         st.stop()
 
     # ── Tabs internas de Meta Ads ──────────────────────────────────────────────
-    tab_dash, tab_create, tab_grid = st.tabs(["📊 Dashboard", "➕ Crear Anuncio", "🗓️ Parrilla de Contenido"])
+    tab_dash, tab_create, tab_grid, tab_ai = st.tabs(
+        ["📊 Dashboard", "➕ Crear Anuncio", "🗓️ Parrilla de Contenido", "🧠 Preguntas y Recomendaciones"]
+    )
 
     # ══════════════════════════════════════════════════════════════════════════════
     # TAB 1 — DASHBOARD
@@ -2669,6 +2827,63 @@ elif nav_section == "📊 Meta Ads":
                 st.dataframe(top_posts, use_container_width=True, hide_index=True)
         else:
             st.info("Presiona el botón para generar la recomendación del mes usando tus datos reales.")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 4 — PREGUNTAS Y RECOMENDACIONES (IA basada en reglas)
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab_ai:
+        st.header("🧠 Preguntas y Recomendaciones")
+        st.caption(
+            "Pregúntale a tus anuncios de Meta Ads — analiza tus campañas y conjuntos de anuncios reales "
+            "(incluida la fase de aprendizaje) para darte respuestas y recomendaciones. Basado en reglas, "
+            "sin usar una IA de pago."
+        )
+
+        with st.spinner("Cargando campañas y fase de aprendizaje..."):
+            ai_df_full = fetch_campaigns(account_id, date_preset, since_str, until_str)
+            ai_raw_view = ai_df_full if show_paused else ai_df_full[ai_df_full["Estado"] == "ACTIVE"]
+            ai_view_df = apply_platform_filter(ai_raw_view, platform_filter) if not ai_raw_view.empty else ai_raw_view
+
+            try:
+                ai_learning_df = fetch_learning_status(account_id)
+            except Exception as e:
+                ai_learning_df = pd.DataFrame()
+                st.warning(f"No se pudo cargar la fase de aprendizaje de los conjuntos de anuncios: {e}")
+
+        if ai_view_df is None or ai_view_df.empty:
+            st.info("No hay campañas para analizar en este período y cuenta.")
+        else:
+            if ai_learning_df is not None and not ai_learning_df.empty:
+                en_aprendizaje = (ai_learning_df["Fase"] == "LEARNING").sum()
+                limitado       = (ai_learning_df["Fase"] == "LEARNING_LIMITED").sum()
+                completado     = (ai_learning_df["Fase"] == "SUCCESS").sum()
+                c1, c2, c3 = st.columns(3)
+                c1.metric("🧪 En aprendizaje", en_aprendizaje)
+                c2.metric("⚠️ Aprendizaje limitado", limitado)
+                c3.metric("✅ Aprendizaje completado", completado)
+                with st.expander("Ver detalle por conjunto de anuncios"):
+                    st.dataframe(
+                        ai_learning_df[["Conjunto de anuncios", "Campaña", "Estado", "Fase (texto)", "Presupuesto diario"]]
+                            .rename(columns={"Fase (texto)": "Fase de aprendizaje"})
+                            .style.format({"Presupuesto diario": "${:,.2f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                st.divider()
+
+            st.subheader("💬 Pregúntale a tus anuncios")
+            st.caption(
+                "Ejemplos: '¿qué campañas están en etapa de aprendizaje?', '¿qué debería pausar?', "
+                "'¿cómo está mi frecuencia?', '¿cuáles puedo escalar de presupuesto?', o escribe el nombre de una campaña."
+            )
+            ai_question = st.text_input(
+                "Tu pregunta", key="meta_ai_question",
+                placeholder="Ej: Tengo una campaña en etapa de aprendizaje, ¿la revisas?",
+            )
+            if st.button("Preguntar", key="btn_meta_ai_question", type="primary"):
+                if ai_question.strip():
+                    st.info(generate_meta_ai_answer(ai_question, ai_view_df, ai_learning_df))
+                else:
+                    st.warning("Escribe una pregunta primero.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GOOGLE ADS
