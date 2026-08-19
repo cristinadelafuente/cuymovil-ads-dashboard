@@ -44,6 +44,18 @@ BRAND = {
 PURPLE_SCALE = ["#F1EFFF", "#C8C0FF", "#9F91FF", "#735FF7", "#5543CE", "#3C2CA5", "#150C54"]
 LEMON_SCALE  = ["#FBFFF0", "#F1FFC5", "#E7FF99", "#DCFE6D", "#B6D552", "#92AC3A", "#4B5B16"]
 
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+def _lerp_color(c1: str, c2: str, t: float) -> str:
+    """Interpola entre dos colores hex — usado para degradados de marca que garantizan buen
+    contraste con texto blanco (solo interpola dentro del rango oscuro/medio de morados)."""
+    r1, g1, b1 = _hex_to_rgb(c1)
+    r2, g2, b2 = _hex_to_rgb(c2)
+    r, g, b = int(r1 + (r2 - r1) * t), int(g1 + (g2 - g1) * t), int(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
@@ -883,32 +895,42 @@ def render_domain_top_pages(tp: pd.DataFrame, is_funnel: bool = False, height: i
         return
     if is_funnel:
         n = len(tp)
-        # Medidas fijas en forma de embudo (no proporcionales a los datos reales) para que cada paso
-        # se vea limpio y parejo — los números reales se muestran como texto sobre cada tramo.
-        shape_values = [100 - i * (80 / max(n - 1, 1)) for i in range(n)]
         total_vistas_top = tp["Vistas"].iloc[0] if tp["Vistas"].iloc[0] else 0
-        fig = go.Figure(go.Funnel(
-            orientation="v",
-            x=[f"{i+1}. {p}" for i, p in enumerate(tp["Página"])],
-            y=shape_values,
-            text=[
-                f"{v:,.0f} vistas<br>({(v/total_vistas_top*100 if total_vistas_top else 0):.0f}%)"
-                for v in tp["Vistas"]
-            ],
-            textposition="inside",
-            textinfo="text",
-            textfont=dict(size=20, color=BRAND["white"]),
-            marker=dict(color=PURPLE_SCALE[:n] if n <= len(PURPLE_SCALE) else PURPLE_SCALE),
-            connector=dict(line=dict(color=BRAND["purple_light"], width=1)),
-        ))
-        fig.update_layout(
-            height=height + 140,
-            margin=dict(l=0, r=0, t=10, b=0),
-            font=dict(size=17),
-            xaxis=dict(tickfont=dict(size=15)),
-            showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        # Degradado dentro del rango oscuro/medio de morado de marca — siempre con buen contraste
+        # para texto blanco (nunca cae en tonos pálidos como el primer/segundo color de PURPLE_SCALE).
+        colors = [_lerp_color(BRAND["purple_darker"], BRAND["purple"], i / max(n - 1, 1)) for i in range(n)]
+
+        cells = []
+        for i, (_, row) in enumerate(tp.iterrows()):
+            pct = (row["Vistas"] / total_vistas_top * 100) if total_vistas_top else 0
+            cells.append(f"""
+            <div style="flex:1 1 0; min-width:130px; background:{colors[i]}; border-radius:14px;
+                        padding:16px 12px; text-align:center; color:#FFFFFF;
+                        box-shadow:0 2px 6px rgba(21,12,84,0.25);">
+                <div style="font-size:13px; font-weight:600; letter-spacing:.03em; opacity:.85; margin-bottom:6px;">
+                    PASO {i + 1}
+                </div>
+                <div style="font-size:16px; font-weight:700; margin-bottom:10px; word-break:break-word;">
+                    {row['Página']}
+                </div>
+                <div style="font-size:24px; font-weight:800; line-height:1.1;">{row['Vistas']:,.0f}</div>
+                <div style="font-size:13px; opacity:.9; margin-top:2px;">vistas · {pct:.0f}% del paso 1</div>
+            </div>
+            """)
+            if i < n - 1:
+                cells.append(f"""
+                <div style="display:flex; align-items:center; justify-content:center; flex:0 0 auto;
+                            font-size:30px; font-weight:700; color:{BRAND['lemon_dark']}; padding:0 2px;">
+                    &#10132;
+                </div>
+                """)
+
+        html = f"""
+        <div style="display:flex; align-items:stretch; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+            {''.join(cells)}
+        </div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
     else:
         st.dataframe(
             tp.style.format({"Vistas": "{:,.0f}", "Usuarios": "{:,.0f}"}),
