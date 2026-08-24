@@ -1358,6 +1358,92 @@ def fetch_google_ads_campaigns(customer_id: str, start_date: str, end_date: str)
     return pd.DataFrame(rows)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE ADS — Recomendaciones de contenido para Display (IA basada en reglas)
+# ══════════════════════════════════════════════════════════════════════════════
+DISPLAY_HEADLINES_BANK = [
+    "Internet Ilimitado Ya",
+    "Planes Desde S/19.90",
+    "Cuy Móvil, Sin Límites",
+    "Cambia Hoy, Paga Menos",
+    "Activación 100% Digital",
+    "La Red Que Te Conviene",
+    "Datos Que No Se Acaban",
+    "Tu Plan Ideal Te Espera",
+    "Sin Permanencia Forzada",
+    "Recarga Fácil y Rápido",
+]  # Cada uno ≤ 30 caracteres (límite de Google para títulos de anuncios responsivos)
+
+DISPLAY_LONG_HEADLINE = "Internet ilimitado desde S/19.90 al mes, sin permanencia forzada"  # ≤ 90 caracteres
+
+DISPLAY_DESCRIPTIONS_BANK = [
+    "Activa tu plan Cuy en minutos, 100% online y sin hacer fila.",
+    "Cambia de operador gratis y conserva tu mismo número.",
+    "Planes ilimitados pensados para ti, sin letra chica.",
+    "Miles de personas ya se cambiaron a Cuy Móvil este mes.",
+    "Conéctate sin límites con la red que se adapta a ti.",
+]  # Cada una ≤ 90 caracteres
+
+DISPLAY_IMAGE_SPECS = [
+    ("Imagen horizontal (paisaje)", "1200 × 628 px", "Relación 1.91:1 · mínimo 600×314"),
+    ("Imagen cuadrada",             "1200 × 1200 px", "Relación 1:1 · mínimo 300×300"),
+    ("Logo cuadrado",               "1200 × 1200 px", "Relación 1:1 · mínimo 128×128, fondo sólido o transparente"),
+    ("Logo horizontal",             "1200 × 300 px",  "Relación 4:1 · mínimo 512×128"),
+]
+
+DISPLAY_CTA_OPTIONS = ["Más información", "Comprar ahora", "Regístrate", "Solicitar", "Descargar"]
+
+def generate_google_display_recommendations(gads_df: pd.DataFrame) -> dict:
+    """Genera una recomendación de contenidos para Display basada en el rendimiento real de la campaña
+    de marca (branded) de Google Ads — basado en reglas, sin usar una IA de pago."""
+    branded_row = None
+    if gads_df is not None and not gads_df.empty:
+        branded = gads_df[gads_df["Campaña"].str.contains("brand|marca", case=False, na=False)]
+        if branded.empty and "Tipo" in gads_df.columns:
+            branded = gads_df[gads_df["Tipo"].str.contains("SEARCH", case=False, na=False)].sort_values("CTR", ascending=False)
+        if not branded.empty:
+            branded_row = branded.iloc[0]
+
+    display_df = pd.DataFrame()
+    if gads_df is not None and not gads_df.empty and "Tipo" in gads_df.columns:
+        display_df = gads_df[gads_df["Tipo"].str.contains("DISPLAY", case=False, na=False)]
+
+    notes = []
+    if branded_row is not None:
+        notes.append(
+            f"Tu campaña de marca (**{branded_row['Campaña']}**) tiene un CTR de **{branded_row['CTR']:.2f}%** — "
+            "úsala como referencia: la gente que ya busca 'Cuy Móvil' conoce la marca, así que en Display "
+            "conviene reforzar el mensaje de precio/beneficio para gente que aún no te conoce (frío) o que "
+            "visitó tu web pero no completó una compra (remarketing)."
+        )
+    if not display_df.empty:
+        d = display_df.iloc[0]
+        notes.append(
+            f"Ya tienes una campaña de Display (**{d['Campaña']}**) con CTR {d['CTR']:.2f}%. Si está por debajo "
+            "de 0.5% (benchmark típico de Display), prioriza refrescar las imágenes y los títulos antes que subir presupuesto."
+        )
+    else:
+        notes.append("Aún no detecto una campaña de Display activa en esta cuenta — estas piezas te sirven para crear una nueva.")
+
+    audiences = [
+        "🔁 Remarketing: visitantes de secure.guinea.pe que llegaron a /cuy/plan o /cuy/personal-data pero no llegaron a /cuy/successful (carrito abandonado del flujo de compra).",
+        "🔁 Remarketing: visitantes de cuy.pe y blog.cuy.pe de los últimos 30-60 días.",
+        "🎯 Audiencias en el mercado ('In-Market'): 'Planes de telefonía móvil prepago', 'Operadores móviles', 'Smartphones y accesorios'.",
+        "🎯 Audiencias afines ('Affinity'): tecnología móvil, compradores conscientes de precio.",
+        "👥 Audiencia similar (Similar/Lookalike) a tus clientes actuales o a quienes completaron /cuy/successful.",
+    ]
+
+    return {
+        "notes": notes,
+        "headlines": DISPLAY_HEADLINES_BANK,
+        "long_headline": DISPLAY_LONG_HEADLINE,
+        "descriptions": DISPLAY_DESCRIPTIONS_BANK,
+        "image_specs": DISPLAY_IMAGE_SPECS,
+        "ctas": DISPLAY_CTA_OPTIONS,
+        "audiences": audiences,
+        "branded_row": branded_row,
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
 # ══════════════════════════════════════════════════════════════════════════════
 def generate_google_ads_conclusions(gads_df) -> str:
@@ -3043,6 +3129,61 @@ elif nav_section == "🔍 Google Ads":
         }),
         use_container_width=True, hide_index=True,
     )
+
+    st.divider()
+
+    # ── Recomendaciones de contenido para Display (IA basada en reglas) ────────
+    st.subheader("🎨 Recomendaciones de contenido para Display")
+    st.caption(
+        "Usa el rendimiento de tu campaña de marca (branded) para recomendarte títulos, descripciones, "
+        "especificaciones de imagen y audiencias listas para armar y publicar tu campaña de Display — "
+        "basado en reglas, sin usar una IA de pago."
+    )
+    if st.button("🎯 Generar recomendaciones para Display", type="primary", key="btn_gads_display"):
+        st.session_state["gads_display_generated"] = True
+
+    if st.session_state.get("gads_display_generated"):
+        display_reco = generate_google_display_recommendations(gads_df_unfiltered)
+
+        for note in display_reco["notes"]:
+            st.info(note)
+
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            st.markdown("**📝 Títulos sugeridos** (≤ 30 caracteres c/u)")
+            for h in display_reco["headlines"]:
+                st.markdown(f"- {h}")
+            st.markdown(f"**Título largo** (≤ 90 caracteres): _{display_reco['long_headline']}_")
+        with dc2:
+            st.markdown("**🧾 Descripciones sugeridas** (≤ 90 caracteres c/u)")
+            for d in display_reco["descriptions"]:
+                st.markdown(f"- {d}")
+            st.markdown(f"**Botones de llamada a la acción sugeridos:** {', '.join(display_reco['ctas'])}")
+
+        st.markdown("**🖼️ Especificaciones de imagen para tu diseñador**")
+        specs_df = pd.DataFrame(display_reco["image_specs"], columns=["Elemento", "Tamaño", "Notas"])
+        st.dataframe(specs_df, use_container_width=True, hide_index=True)
+
+        st.markdown("**🎯 Audiencias recomendadas**")
+        for a in display_reco["audiences"]:
+            st.markdown(f"- {a}")
+
+        # Brief descargable para el diseñador
+        brief_rows = (
+            [{"Tipo": "Título", "Contenido": h} for h in display_reco["headlines"]]
+            + [{"Tipo": "Título largo", "Contenido": display_reco["long_headline"]}]
+            + [{"Tipo": "Descripción", "Contenido": d} for d in display_reco["descriptions"]]
+            + [{"Tipo": "CTA sugerido", "Contenido": c} for c in display_reco["ctas"]]
+            + [{"Tipo": "Especificación de imagen", "Contenido": f"{e} — {t} ({n})"} for e, t, n in display_reco["image_specs"]]
+            + [{"Tipo": "Audiencia recomendada", "Contenido": a} for a in display_reco["audiences"]]
+        )
+        brief_csv = pd.DataFrame(brief_rows).to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Descargar brief de Display (CSV) para el diseñador", brief_csv,
+            file_name="brief_display_google_ads.csv", mime="text/csv",
+        )
+    else:
+        st.info("Presiona el botón para generar la recomendación de contenidos para Display.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — WEB ANALYTICS (Google Analytics 4)
