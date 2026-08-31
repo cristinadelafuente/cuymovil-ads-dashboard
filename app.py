@@ -1444,6 +1444,78 @@ def generate_google_display_recommendations(gads_df: pd.DataFrame) -> dict:
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# VENTAS POR CANAL — atribución vía GA4 (conversions), separando Meta Ads FB/IG,
+# Google Ads y otras fuentes identificadas
+# ══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga_sales_by_source(property_id: str, start_date: str, end_date: str, limit: int = 30) -> pd.DataFrame:
+    """Trae conversiones (ventas) y sesiones por fuente/medio de sesión (sessionSourceMedium),
+    para poder atribuirlas a Meta Ads (FB/IG), Google Ads u otras fuentes."""
+    from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric, OrderBy
+    client = init_ga_client()
+    request = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=[Dimension(name="sessionSourceMedium")],
+        metrics=[Metric(name="conversions"), Metric(name="sessions")],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="conversions"), desc=True)],
+        limit=limit,
+    )
+    response = client.run_report(request)
+    rows = [{
+        "Origen":    r.dimension_values[0].value or "(sin asignar)",
+        "Ventas":    float(r.metric_values[0].value),
+        "Sesiones":  float(r.metric_values[1].value),
+    } for r in response.rows]
+    return pd.DataFrame(rows)
+
+def _sales_channel_bucket(source_medium: str) -> str:
+    """Clasifica un 'fuente / medio' de GA4 en un canal de negocio — separa Meta Ads en Facebook e
+    Instagram, identifica Google Ads, y agrupa/etiqueta el resto de fuentes que puede reconocer."""
+    s = source_medium.lower()
+    is_paid = any(k in s for k in ["cpc", "ppc", "paid", "display", "cpm"])
+
+    if "facebook" in s or s.startswith("fb "):
+        return "📘 Meta Ads — Facebook" if is_paid else "📘 Facebook (orgánico)"
+    if "instagram" in s or s.startswith("ig "):
+        return "📸 Meta Ads — Instagram" if is_paid else "📸 Instagram (orgánico)"
+    if "audience network" in s or "messenger" in s:
+        return "📣 Meta Ads — Otras (Audience Network/Messenger)"
+    if "google" in s:
+        if is_paid:
+            return "🔍 Google Ads"
+        if "organic" in s:
+            return "🌱 Google (orgánico/SEO)"
+        return "🔍 Google (otro)"
+    if "(direct)" in s:
+        return "➡️ Directo"
+    if "cuy.pe" in s and "blog" not in s:
+        return "🐹 cuy.pe (link interno)"
+    if "blog.cuy.pe" in s:
+        return "📝 blog.cuy.pe (link interno)"
+    if "tiktok" in s:
+        return "🎵 TikTok" + (" Ads" if is_paid else " (orgánico)")
+    if "email" in s or "newsletter" in s:
+        return "✉️ Email"
+    if "organic" in s:
+        return "🌱 Búsqueda orgánica (otro buscador)"
+    if "referral" in s:
+        origen_ref = source_medium.split("/")[0].strip()
+        return f"🔗 Referral: {origen_ref}"
+    return f"🌐 Otro: {source_medium}"
+
+def build_sales_by_channel(origin_df: pd.DataFrame) -> pd.DataFrame:
+    """Agrupa el detalle de origen (sessionSourceMedium) en canales de negocio con el total de ventas."""
+    if origin_df is None or origin_df.empty:
+        return pd.DataFrame(columns=["Canal", "Ventas", "Sesiones", "% de ventas"])
+    df = origin_df.copy()
+    df["Canal"] = df["Origen"].apply(_sales_channel_bucket)
+    grouped = df.groupby("Canal", as_index=False)[["Ventas", "Sesiones"]].sum()
+    total_ventas = grouped["Ventas"].sum()
+    grouped["% de ventas"] = (grouped["Ventas"] / total_ventas * 100) if total_ventas else 0.0
+    return grouped.sort_values("Ventas", ascending=False).reset_index(drop=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ANÁLISIS UNIFICADO (Resumen) — narrativa automática + preguntas libres
 # ══════════════════════════════════════════════════════════════════════════════
 def generate_google_ads_conclusions(gads_df) -> str:
@@ -2287,6 +2359,52 @@ if nav_section == "📋 Resumen":
             )
         else:
             st.info("Sin datos de páginas para este período.")
+
+    st.divider()
+
+    # Ventas por canal — atribución vía GA4 (conversions), separando Meta Ads FB/IG, Google Ads y otras fuentes
+    st.subheader("💰 Ventas por canal")
+    st.caption(
+        "Ventas (conversiones registradas en GA4) atribuidas por fuente de la sesión — separa Meta Ads en "
+        "Facebook e Instagram, Google Ads, y otras fuentes que el sistema identifica automáticamente."
+    )
+    if "gcp_service_account" in st.secrets:
+        try:
+            with st.spinner("Calculando ventas por canal..."):
+                sales_origin_r = fetch_ga_sales_by_source(GA_PROPERTY_ID, r_start, r_end)
+                sales_by_channel_r = build_sales_by_channel(sales_origin_r)
+        except Exception as e:
+            sales_by_channel_r = pd.DataFrame()
+            st.warning(f"No se pudo calcular ventas por canal: {e}")
+
+        if sales_by_channel_r is not None and not sales_by_channel_r.empty and sales_by_channel_r["Ventas"].sum() > 0:
+            sc1, sc2 = st.columns([3, 2])
+            with sc1:
+                chart_sales = sales_by_channel_r[sales_by_channel_r["Ventas"] > 0].sort_values("Ventas")
+                max_ventas = chart_sales["Ventas"].max()
+                fig = px.bar(
+                    chart_sales, x="Ventas", y="Canal", orientation="h",
+                    color="Canal", color_discrete_sequence=PURPLE_SCALE + LEMON_SCALE,
+                    text="Ventas",
+                )
+                fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
+                fig.update_layout(
+                    height=max(320, 34 * len(chart_sales)), margin=dict(l=0, r=60, t=0, b=0),
+                    yaxis_title="", xaxis=dict(range=[0, max_ventas * 1.2]), showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            with sc2:
+                st.dataframe(
+                    sales_by_channel_r[["Canal", "Ventas", "% de ventas"]]
+                        .style.format({"Ventas": "{:,.0f}", "% de ventas": "{:.1f}%"}),
+                    use_container_width=True, hide_index=True, height=max(320, 34 * len(sales_by_channel_r)),
+                )
+            top_canal = sales_by_channel_r.iloc[0]
+            st.caption(f"El canal que más ventas genera es **{top_canal['Canal']}** con {top_canal['Ventas']:,.0f} ventas ({top_canal['% de ventas']:.1f}% del total).")
+        else:
+            st.info("No hay conversiones registradas en GA4 para este período — verifica que tengas un evento clave (key event) configurado, como completar la compra en /cuy/successful.")
+    else:
+        st.info("Google Analytics no está conectado (falta la cuenta de servicio en Secrets).")
 
     st.divider()
 
