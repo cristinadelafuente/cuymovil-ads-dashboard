@@ -812,6 +812,47 @@ def get_ad_preview_html(account_id, page_id, image_hash, primary_text, headline,
         return result[0].get("body", "")
     return None
 
+def get_carousel_preview_html(account_id, page_id, cards, primary_text, destination_url, cta_type, ad_format):
+    """cards: lista de {"image_hash","headline","description"} — vista previa de un anuncio de carrusel."""
+    init_api()
+    child_attachments = [{
+        "link":        destination_url,
+        "image_hash":  c["image_hash"],
+        "name":        c.get("headline") or "",
+        "description": c.get("description") or "",
+    } for c in cards]
+    creative_spec = {
+        "object_story_spec": {
+            "page_id": page_id,
+            "link_data": {
+                "link":              destination_url,
+                "message":           primary_text,
+                "child_attachments": child_attachments,
+                "call_to_action":    {"type": cta_type, "value": {"link": destination_url}},
+                "multi_share_optimized": True,
+            }
+        }
+    }
+    result = AdAccount(account_id).get_generate_previews(params={
+        "creative": creative_spec,
+        "ad_format": ad_format,
+    })
+    if result:
+        return result[0].get("body", "")
+    return None
+
+# Parámetros UTM que Meta agrega automáticamente al link de destino al momento de servir el anuncio
+# (no modifican el link guardado en la creatividad). {{site_source_name}} resuelve dinámicamente a
+# "fb", "ig", "an" (Audience Network) o "msg" (Messenger) según donde se haya mostrado el anuncio —
+# así GA4 puede distinguir Facebook de Instagram automáticamente en sessionSourceMedium.
+META_UTM_TAGS = (
+    "utm_source={{site_source_name}}"
+    "&utm_medium=paidsocial"
+    "&utm_campaign={{campaign.name}}"
+    "&utm_content={{ad.name}}"
+    "&utm_term={{adset.name}}"
+)
+
 # ── Creación completa de anuncio (soporta 1 o varios conjuntos por plataforma) ─
 def create_full_ad(
     account_id, page_id, camp_name, objective,
@@ -819,6 +860,8 @@ def create_full_ad(
     countries, age_min, age_max, genders, interest_ids, custom_audience_ids,
     image_bytes, image_ext, primary_text, headline, ad_description,
     destination_url, cta_type, start_date,
+    carousel_cards=None,  # opcional: lista de {"image_bytes","image_ext","headline","description"} — si se
+                          # pasa (2 a 10 tarjetas), se crea un anuncio de carrusel en vez de imagen única.
 ):
     init_api()
 
@@ -835,27 +878,55 @@ def create_full_ad(
     )
     camp_id = camp[Campaign.Field.id]
 
-    # 2. Imagen y creatividad (una sola, compartida por todos los conjuntos)
-    image_hash = upload_ad_image(account_id, image_bytes, image_ext)
-
-    creative = AdAccount(account_id).create_ad_creative(
-        fields=[AdCreative.Field.id],
-        params={
-            AdCreative.Field.name: f"Creative_{camp_name[:50]}",
-            AdCreative.Field.object_story_spec: {
-                "page_id": page_id,
-                "link_data": {
-                    "image_hash":     image_hash,
-                    "link":           destination_url,
-                    "message":        primary_text,
-                    "name":           headline,
-                    "description":    ad_description,
-                    "call_to_action": {"type": cta_type, "value": {"link": destination_url}},
+    # 2. Imagen(es) y creatividad (una sola, compartida por todos los conjuntos)
+    if carousel_cards:
+        child_attachments = []
+        for card in carousel_cards:
+            card_hash = upload_ad_image(account_id, card["image_bytes"], card["image_ext"])
+            child_attachments.append({
+                "link":        destination_url,
+                "image_hash":  card_hash,
+                "name":        card.get("headline") or headline,
+                "description": card.get("description") or ad_description,
+            })
+        creative = AdAccount(account_id).create_ad_creative(
+            fields=[AdCreative.Field.id],
+            params={
+                AdCreative.Field.name: f"Creative_{camp_name[:50]}",
+                AdCreative.Field.object_story_spec: {
+                    "page_id": page_id,
+                    "link_data": {
+                        "link":               destination_url,
+                        "message":            primary_text,
+                        "child_attachments":  child_attachments,
+                        "call_to_action":     {"type": cta_type, "value": {"link": destination_url}},
+                        "multi_share_optimized": True,
+                    }
                 }
             }
-        }
-    )
-    creative_id = creative[AdCreative.Field.id]
+        )
+        creative_id = creative[AdCreative.Field.id]
+    else:
+        image_hash = upload_ad_image(account_id, image_bytes, image_ext)
+
+        creative = AdAccount(account_id).create_ad_creative(
+            fields=[AdCreative.Field.id],
+            params={
+                AdCreative.Field.name: f"Creative_{camp_name[:50]}",
+                AdCreative.Field.object_story_spec: {
+                    "page_id": page_id,
+                    "link_data": {
+                        "image_hash":     image_hash,
+                        "link":           destination_url,
+                        "message":        primary_text,
+                        "name":           headline,
+                        "description":    ad_description,
+                        "call_to_action": {"type": cta_type, "value": {"link": destination_url}},
+                    }
+                }
+            }
+        )
+        creative_id = creative[AdCreative.Field.id]
 
     start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
 
@@ -902,6 +973,7 @@ def create_full_ad(
                 Ad.Field.adset_id: adset_id,
                 Ad.Field.creative: {"creative_id": creative_id},
                 Ad.Field.status:   "PAUSED",
+                "url_tags":        META_UTM_TAGS,
             }
         )
         results.append({
@@ -2642,6 +2714,11 @@ elif nav_section == "📊 Meta Ads":
         else:
             st.header("➕ Crear nuevo anuncio")
             st.caption("El anuncio se crea en estado **PAUSADO**. Revísalo en Ads Manager antes de activarlo.")
+            st.caption(
+                "🏷️ El link de destino se etiqueta automáticamente con parámetros UTM "
+                "(`utm_source`, `utm_medium`, `utm_campaign`, etc.) para que Google Analytics pueda "
+                "distinguir Facebook de Instagram y atribuirte las ventas correctamente."
+            )
 
             # Page ID
             page_id_input = PAGE_ID or ""
@@ -2839,12 +2916,47 @@ elif nav_section == "📊 Meta Ads":
             # ── PASO 3: Creatividad ───────────────────────────────────────────────────
             st.subheader("3️⃣  Creatividad del anuncio")
 
-            uploaded_image = st.file_uploader(
-                "Imagen del anuncio * (JPG o PNG — mín. 1080×1080 px recomendado)",
-                type=["jpg", "jpeg", "png"],
+            is_carousel = st.checkbox(
+                "🎠 Publicar como carrusel (2 a 10 imágenes)",
+                help="Cada imagen se muestra como una tarjeta deslizable. Puedes darle a cada tarjeta su propio titular y descripción, o dejar el titular/descripción general de abajo.",
             )
-            if uploaded_image:
-                st.image(uploaded_image, caption="Imagen cargada", width=280)
+
+            uploaded_image = None
+            uploaded_carousel_images = []
+            carousel_card_texts = []
+
+            if is_carousel:
+                uploaded_carousel_images = st.file_uploader(
+                    "Imágenes del carrusel * (JPG o PNG — mín. 1080×1080 px recomendado, 2 a 10 imágenes)",
+                    type=["jpg", "jpeg", "png"],
+                    accept_multiple_files=True,
+                )
+                if uploaded_carousel_images:
+                    if len(uploaded_carousel_images) > 10:
+                        st.warning("Meta permite máximo 10 tarjetas en un carrusel — se usarán solo las primeras 10.")
+                        uploaded_carousel_images = uploaded_carousel_images[:10]
+                    st.caption(f"{len(uploaded_carousel_images)} imagen(es) cargada(s). Opcionalmente, personaliza cada tarjeta:")
+                    for i, img in enumerate(uploaded_carousel_images):
+                        cc1, cc2 = st.columns([1, 3])
+                        with cc1:
+                            st.image(img, width=140)
+                        with cc2:
+                            card_headline = st.text_input(
+                                f"Titular tarjeta {i + 1} (opcional, si vacío usa el titular general)",
+                                key=f"carousel_headline_{i}",
+                            )
+                            card_description = st.text_input(
+                                f"Descripción tarjeta {i + 1} (opcional)",
+                                key=f"carousel_description_{i}",
+                            )
+                        carousel_card_texts.append({"headline": card_headline, "description": card_description})
+            else:
+                uploaded_image = st.file_uploader(
+                    "Imagen del anuncio * (JPG o PNG — mín. 1080×1080 px recomendado)",
+                    type=["jpg", "jpeg", "png"],
+                )
+                if uploaded_image:
+                    st.image(uploaded_image, caption="Imagen cargada", width=280)
 
             cr1, cr2 = st.columns(2)
             with cr1:
@@ -2870,7 +2982,30 @@ elif nav_section == "📊 Meta Ads":
             preview_ad_format = "MOBILE_FEED_STANDARD" if "Facebook" in preview_platform_label else "INSTAGRAM_STANDARD"
 
             if st.button("🔍 Generar vista previa"):
-                if not uploaded_image or not page_id_input or not destination_url:
+                if is_carousel:
+                    if len(uploaded_carousel_images) < 2 or not page_id_input or not destination_url:
+                        st.warning("Sube al menos 2 imágenes para el carrusel, indica el ID de página y la URL de destino antes de generar la vista previa.")
+                    else:
+                        with st.spinner("Generando vista previa del carrusel con Meta..."):
+                            try:
+                                preview_cards = []
+                                for img, texts in zip(uploaded_carousel_images, carousel_card_texts):
+                                    img_bytes = img.getvalue()
+                                    img_ext = img.name.rsplit(".", 1)[-1] if "." in img.name else "jpg"
+                                    card_hash = upload_ad_image(account_id, img_bytes, img_ext)
+                                    preview_cards.append({
+                                        "image_hash": card_hash,
+                                        "headline": texts.get("headline") or headline,
+                                        "description": texts.get("description") or ad_description,
+                                    })
+                                preview_html = get_carousel_preview_html(
+                                    account_id, page_id_input, preview_cards,
+                                    primary_text or " ", destination_url, cta_type, preview_ad_format,
+                                )
+                                st.session_state["preview_html"] = preview_html
+                            except Exception as e:
+                                st.error(f"No se pudo generar la vista previa: {e}")
+                elif not uploaded_image or not page_id_input or not destination_url:
                     st.warning("Sube una imagen, indica el ID de página y la URL de destino antes de generar la vista previa.")
                 else:
                     with st.spinner("Generando vista previa con Meta..."):
@@ -2914,7 +3049,11 @@ elif nav_section == "📊 Meta Ads":
             if not destination_url:    missing.append("URL de destino")
             if not primary_text:       missing.append("Texto principal")
             if not headline:           missing.append("Titular")
-            if not uploaded_image:     missing.append("Imagen del anuncio")
+            if is_carousel:
+                if len(uploaded_carousel_images) < 2:
+                    missing.append("Al menos 2 imágenes para el carrusel")
+            elif not uploaded_image:
+                missing.append("Imagen del anuncio")
             if not selected_countries: missing.append("Al menos un país")
             if not platforms_selected: missing.append("Al menos una plataforma (Facebook o Instagram)")
 
@@ -2923,10 +3062,24 @@ elif nav_section == "📊 Meta Ads":
                 st.button("🚀 Crear anuncio (pausado)", type="primary", disabled=True)
             else:
                 if st.button("🚀 Crear anuncio (pausado)", type="primary"):
-                    with st.spinner("Creando campaña → conjunto(s) → imagen → creatividad → anuncio(s)…"):
+                    with st.spinner("Creando campaña → conjunto(s) → imagen(es) → creatividad → anuncio(s)…"):
                         try:
-                            image_bytes = uploaded_image.read()
-                            image_ext   = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
+                            image_bytes = None
+                            image_ext = None
+                            carousel_cards = None
+
+                            if is_carousel:
+                                carousel_cards = []
+                                for img, texts in zip(uploaded_carousel_images, carousel_card_texts):
+                                    carousel_cards.append({
+                                        "image_bytes": img.getvalue(),
+                                        "image_ext":   img.name.rsplit(".", 1)[-1] if "." in img.name else "jpg",
+                                        "headline":    texts.get("headline"),
+                                        "description": texts.get("description"),
+                                    })
+                            else:
+                                image_bytes = uploaded_image.read()
+                                image_ext   = uploaded_image.name.rsplit(".", 1)[-1] if "." in uploaded_image.name else "jpg"
 
                             # Armar la configuración de conjuntos de anuncios por plataforma
                             if differentiate_budget:
@@ -2959,6 +3112,7 @@ elif nav_section == "📊 Meta Ads":
                                 destination_url=destination_url,
                                 cta_type=cta_type,
                                 start_date=start_date,
+                                carousel_cards=carousel_cards,
                             )
 
                             st.success("✅ ¡Anuncio creado exitosamente en estado PAUSADO!")
