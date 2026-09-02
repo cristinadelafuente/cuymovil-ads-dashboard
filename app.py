@@ -1477,6 +1477,62 @@ GOOGLE_LOCATION_IDS = {
 }
 GOOGLE_LANGUAGE_IDS = {"Español": "1003", "Inglés": "1000", "Portugués": "1014"}
 
+GOOGLE_AGE_RANGE_OPTIONS = {
+    "18-24": "AGE_RANGE_18_24",
+    "25-34": "AGE_RANGE_25_34",
+    "35-44": "AGE_RANGE_35_44",
+    "45-54": "AGE_RANGE_45_54",
+    "55-64": "AGE_RANGE_55_64",
+    "65+":   "AGE_RANGE_65_UP",
+    "Desconocida": "AGE_RANGE_UNDETERMINED",
+}
+GOOGLE_GENDER_OPTIONS = {"Hombres": "MALE", "Mujeres": "FEMALE", "Desconocido": "UNDETERMINED"}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_google_user_lists(customer_id: str) -> pd.DataFrame:
+    """Trae las listas de remarketing/audiencias ya existentes en la cuenta de Google Ads."""
+    client = init_google_ads_client()
+    ga_service = client.get_service("GoogleAdsService")
+    customer_id_clean = str(customer_id).replace("-", "")
+    query = """
+        SELECT user_list.id, user_list.name, user_list.type, user_list.size_for_display
+        FROM user_list
+        WHERE user_list.membership_status = 'OPEN'
+        ORDER BY user_list.name
+    """
+    response = ga_service.search(customer_id=customer_id_clean, query=query)
+    rows = [{
+        "id":            row.user_list.id,
+        "resource_name": f"customers/{customer_id_clean}/userLists/{row.user_list.id}",
+        "Nombre":        row.user_list.name,
+        "Tipo":          row.user_list.type_.name,
+        "Tamaño (Display)": row.user_list.size_for_display,
+    } for row in response]
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_google_user_interests(query_text: str, limit: int = 15) -> pd.DataFrame:
+    """Busca categorías de audiencia de Google (afinidad / in-market) que coincidan con el texto —
+    equivalente al buscador de intereses de Meta, pero contra la taxonomía de Google Ads."""
+    client = init_google_ads_client()
+    customer_id_clean = str(GOOGLE_ADS_CUSTOMER_ID).replace("-", "")
+    ga_service = client.get_service("GoogleAdsService")
+    safe_text = query_text.replace("'", "")
+    gaql = f"""
+        SELECT user_interest.id, user_interest.name, user_interest.taxonomy_type, user_interest.resource_name
+        FROM user_interest
+        WHERE user_interest.name LIKE '%{safe_text}%'
+        LIMIT {limit}
+    """
+    response = ga_service.search(customer_id=customer_id_clean, query=gaql)
+    rows = [{
+        "id":            row.user_interest.id,
+        "resource_name": row.user_interest.resource_name,
+        "Nombre":        row.user_interest.name,
+        "Tipo":          row.user_interest.taxonomy_type.name,
+    } for row in response]
+    return pd.DataFrame(rows)
+
 def _gads_upload_image_asset(client, customer_id: str, image_bytes: bytes, asset_name: str) -> str:
     """Sube una imagen como Asset de Google Ads y devuelve su resource_name."""
     asset_service = client.get_service("AssetService")
@@ -1493,6 +1549,8 @@ def create_display_campaign(
     headlines: list, long_headline: str, descriptions: list, business_name: str,
     marketing_image_bytes: bytes, square_image_bytes: bytes, logo_image_bytes: bytes = None,
     location_ids: list = None, language_id: str = "1003", start_date=None,
+    age_range_keys: list = None, gender_keys: list = None,
+    user_list_resource_names: list = None, user_interest_resource_names: list = None,
 ) -> dict:
     """Crea una campaña de Display de Google Ads completa (presupuesto → campaña → segmentación →
     grupo de anuncios → imágenes → anuncio de Display responsivo), en estado PAUSADO."""
@@ -1542,6 +1600,35 @@ def create_display_campaign(
     lang_crit.campaign = campaign_resource_name
     lang_crit.language.language_constant = f"languageConstants/{language_id}"
     criterion_ops.append(lang_op)
+
+    # Demografía: edad y género (opcional)
+    for age_key in (age_range_keys or []):
+        age_op = client.get_type("CampaignCriterionOperation")
+        age_crit = age_op.create
+        age_crit.campaign = campaign_resource_name
+        age_crit.age_range.type_ = getattr(client.enums.AgeRangeTypeEnum, GOOGLE_AGE_RANGE_OPTIONS[age_key])
+        criterion_ops.append(age_op)
+    for gender_key in (gender_keys or []):
+        gender_op = client.get_type("CampaignCriterionOperation")
+        gender_crit = gender_op.create
+        gender_crit.campaign = campaign_resource_name
+        gender_crit.gender.type_ = getattr(client.enums.GenderTypeEnum, GOOGLE_GENDER_OPTIONS[gender_key])
+        criterion_ops.append(gender_op)
+
+    # Audiencias: listas de remarketing e intereses de afinidad/in-market (opcional)
+    for ul_resource in (user_list_resource_names or []):
+        ul_op = client.get_type("CampaignCriterionOperation")
+        ul_crit = ul_op.create
+        ul_crit.campaign = campaign_resource_name
+        ul_crit.user_list.user_list = ul_resource
+        criterion_ops.append(ul_op)
+    for ui_resource in (user_interest_resource_names or []):
+        ui_op = client.get_type("CampaignCriterionOperation")
+        ui_crit = ui_op.create
+        ui_crit.campaign = campaign_resource_name
+        ui_crit.user_interest.user_interest_category = ui_resource
+        criterion_ops.append(ui_op)
+
     criterion_service.mutate_campaign_criteria(customer_id=customer_id_clean, operations=criterion_ops)
 
     # 4. Grupo de anuncios
@@ -3614,6 +3701,59 @@ elif nav_section == "🔍 Google Ads":
             "Google Ads antes de activarla."
         )
 
+        with st.expander("🎯 Audiencias (opcional)", expanded=False):
+            st.markdown("**Demografía**")
+            gd_age_keys = st.multiselect("Edad", list(GOOGLE_AGE_RANGE_OPTIONS.keys()), key="gd_age_keys")
+            gd_gender_keys = st.multiselect("Género", list(GOOGLE_GENDER_OPTIONS.keys()), key="gd_gender_keys")
+
+            st.divider()
+            st.markdown("**🔄 Listas de remarketing**")
+            st.caption("Trae las audiencias/listas de remarketing que ya tienes creadas en tu cuenta de Google Ads.")
+            if st.button("Cargar mis listas de remarketing", key="btn_load_gads_userlists"):
+                with st.spinner("Buscando listas de remarketing en tu cuenta..."):
+                    try:
+                        st.session_state["gads_user_lists"] = fetch_google_user_lists(GOOGLE_ADS_CUSTOMER_ID)
+                    except Exception as e:
+                        st.warning(f"No se pudieron cargar las listas: {e}")
+                        st.session_state["gads_user_lists"] = pd.DataFrame()
+
+            user_lists_df = st.session_state.get("gads_user_lists")
+            gd_selected_user_lists = []
+            if user_lists_df is not None and not user_lists_df.empty:
+                gd_selected_user_list_names = st.multiselect(
+                    "Selecciona listas de remarketing", user_lists_df["Nombre"].tolist(), key="gd_userlist_select",
+                )
+                gd_selected_user_lists = user_lists_df[
+                    user_lists_df["Nombre"].isin(gd_selected_user_list_names)
+                ]["resource_name"].tolist()
+            elif user_lists_df is not None and user_lists_df.empty:
+                st.caption("No se encontraron listas de remarketing abiertas en esta cuenta.")
+
+            st.divider()
+            st.markdown("**🎯 Audiencias de afinidad / in-market**")
+            st.caption("Busca categorías de audiencia de Google (ej. 'planes móviles', 'telecomunicaciones', 'smartphones').")
+            gd_interest_query = st.text_input("Buscar audiencia", key="gd_interest_query")
+            if st.button("🔍 Buscar audiencias de Google", key="btn_search_gads_interests"):
+                if gd_interest_query.strip():
+                    with st.spinner("Buscando en la taxonomía de audiencias de Google..."):
+                        try:
+                            st.session_state["gads_interest_results"] = search_google_user_interests(gd_interest_query.strip())
+                        except Exception as e:
+                            st.warning(f"No se pudo buscar: {e}")
+                            st.session_state["gads_interest_results"] = pd.DataFrame()
+                else:
+                    st.warning("Escribe un término de búsqueda primero.")
+
+            interest_results_df = st.session_state.get("gads_interest_results")
+            gd_selected_interests = []
+            if interest_results_df is not None and not interest_results_df.empty:
+                interest_labels = [f"{row['Nombre']} ({row['Tipo']})" for _, row in interest_results_df.iterrows()]
+                gd_selected_interest_labels = st.multiselect("Selecciona audiencias", interest_labels, key="gd_interest_select")
+                idxs = [interest_labels.index(l) for l in gd_selected_interest_labels]
+                gd_selected_interests = interest_results_df.iloc[idxs]["resource_name"].tolist()
+            elif interest_results_df is not None and interest_results_df.empty:
+                st.caption("No se encontraron audiencias que coincidan con esa búsqueda.")
+
         with st.form("gads_display_form"):
             gd1, gd2 = st.columns(2)
             with gd1:
@@ -3694,6 +3834,10 @@ elif nav_section == "🔍 Google Ads":
                             location_ids=[GOOGLE_LOCATION_IDS[c] for c in gd_locations_es],
                             language_id=GOOGLE_LANGUAGE_IDS[gd_language_label],
                             start_date=gd_start_date,
+                            age_range_keys=gd_age_keys,
+                            gender_keys=gd_gender_keys,
+                            user_list_resource_names=gd_selected_user_lists,
+                            user_interest_resource_names=gd_selected_interests,
                         )
                         st.success("✅ ¡Campaña de Display creada exitosamente en estado PAUSADO!")
                         st.markdown(f"""
