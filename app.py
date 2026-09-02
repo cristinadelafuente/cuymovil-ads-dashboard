@@ -1464,6 +1464,146 @@ DISPLAY_IMAGE_SPECS = [
 
 DISPLAY_CTA_OPTIONS = ["Más información", "Comprar ahora", "Regístrate", "Solicitar", "Descargar"]
 
+GOOGLE_LOCATION_IDS = {
+    "Perú":            "2604",
+    "México":          "2484",
+    "Colombia":        "2170",
+    "Argentina":       "2032",
+    "Chile":           "2152",
+    "Ecuador":         "2218",
+    "Bolivia":         "2068",
+    "Venezuela":       "2862",
+    "Estados Unidos":  "2840",
+}
+GOOGLE_LANGUAGE_IDS = {"Español": "1003", "Inglés": "1000", "Portugués": "1014"}
+
+def _gads_upload_image_asset(client, customer_id: str, image_bytes: bytes, asset_name: str) -> str:
+    """Sube una imagen como Asset de Google Ads y devuelve su resource_name."""
+    asset_service = client.get_service("AssetService")
+    operation = client.get_type("AssetOperation")
+    asset = operation.create
+    asset.name = asset_name
+    asset.type_ = client.enums.AssetTypeEnum.IMAGE
+    asset.image_asset.data = image_bytes
+    response = asset_service.mutate_assets(customer_id=customer_id, operations=[operation])
+    return response.results[0].resource_name
+
+def create_display_campaign(
+    customer_id: str, campaign_name: str, daily_budget_usd: float, final_url: str,
+    headlines: list, long_headline: str, descriptions: list, business_name: str,
+    marketing_image_bytes: bytes, square_image_bytes: bytes, logo_image_bytes: bytes = None,
+    location_ids: list = None, language_id: str = "1003", start_date=None,
+) -> dict:
+    """Crea una campaña de Display de Google Ads completa (presupuesto → campaña → segmentación →
+    grupo de anuncios → imágenes → anuncio de Display responsivo), en estado PAUSADO."""
+    client = init_google_ads_client()
+    customer_id_clean = str(customer_id).replace("-", "")
+    location_ids = location_ids or ["2604"]
+
+    # 1. Presupuesto
+    budget_service = client.get_service("CampaignBudgetService")
+    budget_operation = client.get_type("CampaignBudgetOperation")
+    budget = budget_operation.create
+    budget.name = f"Budget_{campaign_name[:40]}_{int(datetime.now().timestamp())}"
+    budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    budget.amount_micros = int(daily_budget_usd * 1_000_000)
+    budget_response = budget_service.mutate_campaign_budgets(customer_id=customer_id_clean, operations=[budget_operation])
+    budget_resource_name = budget_response.results[0].resource_name
+
+    # 2. Campaña de Display
+    campaign_service = client.get_service("CampaignService")
+    campaign_operation = client.get_type("CampaignOperation")
+    campaign = campaign_operation.create
+    campaign.name = campaign_name
+    campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.DISPLAY
+    campaign.status = client.enums.CampaignStatusEnum.PAUSED
+    campaign.campaign_budget = budget_resource_name
+    campaign.manual_cpc.enhanced_cpc_enabled = False
+    campaign.network_settings.target_google_search = False
+    campaign.network_settings.target_search_network = False
+    campaign.network_settings.target_content_network = True
+    campaign.network_settings.target_partner_search_network = False
+    if start_date:
+        campaign.start_date = start_date.strftime("%Y%m%d")
+    campaign_response = campaign_service.mutate_campaigns(customer_id=customer_id_clean, operations=[campaign_operation])
+    campaign_resource_name = campaign_response.results[0].resource_name
+
+    # 3. Segmentación geográfica e idioma
+    criterion_service = client.get_service("CampaignCriterionService")
+    criterion_ops = []
+    for loc_id in location_ids:
+        op = client.get_type("CampaignCriterionOperation")
+        crit = op.create
+        crit.campaign = campaign_resource_name
+        crit.location.geo_target_constant = f"geoTargetConstants/{loc_id}"
+        criterion_ops.append(op)
+    lang_op = client.get_type("CampaignCriterionOperation")
+    lang_crit = lang_op.create
+    lang_crit.campaign = campaign_resource_name
+    lang_crit.language.language_constant = f"languageConstants/{language_id}"
+    criterion_ops.append(lang_op)
+    criterion_service.mutate_campaign_criteria(customer_id=customer_id_clean, operations=criterion_ops)
+
+    # 4. Grupo de anuncios
+    ad_group_service = client.get_service("AdGroupService")
+    ad_group_operation = client.get_type("AdGroupOperation")
+    ad_group = ad_group_operation.create
+    ad_group.name = f"{campaign_name}_AdGroup"
+    ad_group.campaign = campaign_resource_name
+    ad_group.status = client.enums.AdGroupStatusEnum.ENABLED
+    ad_group.type_ = client.enums.AdGroupTypeEnum.DISPLAY_STANDARD
+    ad_group_response = ad_group_service.mutate_ad_groups(customer_id=customer_id_clean, operations=[ad_group_operation])
+    ad_group_resource_name = ad_group_response.results[0].resource_name
+
+    # 5. Imágenes como Assets
+    marketing_image_asset = _gads_upload_image_asset(client, customer_id_clean, marketing_image_bytes, f"{campaign_name}_marketing_{int(datetime.now().timestamp())}")
+    square_image_asset    = _gads_upload_image_asset(client, customer_id_clean, square_image_bytes, f"{campaign_name}_square_{int(datetime.now().timestamp())}")
+    logo_image_asset = None
+    if logo_image_bytes:
+        logo_image_asset = _gads_upload_image_asset(client, customer_id_clean, logo_image_bytes, f"{campaign_name}_logo_{int(datetime.now().timestamp())}")
+
+    # 6. Anuncio de Display responsivo
+    ad_group_ad_service = client.get_service("AdGroupAdService")
+    ad_group_ad_operation = client.get_type("AdGroupAdOperation")
+    ad_group_ad = ad_group_ad_operation.create
+    ad_group_ad.ad_group = ad_group_resource_name
+    ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
+
+    rda = ad_group_ad.ad.responsive_display_ad
+    for h in headlines[:5]:
+        text_asset = client.get_type("AdTextAsset")
+        text_asset.text = h
+        rda.headlines.append(text_asset)
+    rda.long_headline.text = long_headline
+    for d in descriptions[:5]:
+        text_asset = client.get_type("AdTextAsset")
+        text_asset.text = d
+        rda.descriptions.append(text_asset)
+    rda.business_name = business_name
+
+    mkt_img = client.get_type("AdImageAsset")
+    mkt_img.asset = marketing_image_asset
+    rda.marketing_images.append(mkt_img)
+
+    sq_img = client.get_type("AdImageAsset")
+    sq_img.asset = square_image_asset
+    rda.square_marketing_images.append(sq_img)
+
+    if logo_image_asset:
+        logo_img = client.get_type("AdImageAsset")
+        logo_img.asset = logo_image_asset
+        rda.logo_images.append(logo_img)
+
+    ad_group_ad.ad.final_urls.append(final_url)
+
+    ad_response = ad_group_ad_service.mutate_ad_group_ads(customer_id=customer_id_clean, operations=[ad_group_ad_operation])
+
+    return {
+        "campaign_resource_name": campaign_resource_name,
+        "ad_group_resource_name": ad_group_resource_name,
+        "ad_resource_name":       ad_response.results[0].resource_name,
+    }
+
 def generate_google_display_recommendations(gads_df: pd.DataFrame) -> dict:
     """Genera una recomendación de contenidos para Display basada en el rendimiento real de la campaña
     de marca (branded) de Google Ads — basado en reglas, sin usar una IA de pago."""
@@ -3456,6 +3596,120 @@ elif nav_section == "🔍 Google Ads":
         )
     else:
         st.info("Presiona el botón para generar la recomendación de contenidos para Display.")
+
+    st.divider()
+
+    if not IS_ADMIN:
+        st.divider()
+        st.info(
+            "🔒 Crear campañas de Display es solo para administradores. Tu cuenta tiene acceso "
+            "de solo lectura y no puede publicar campañas."
+        )
+    else:
+        # ── Crear campaña de Display (Google Ads) ──────────────────────────────────
+        st.subheader("🚀 Crear campaña de Display")
+        st.caption(
+            "Crea una campaña de Display con un anuncio responsivo (varios títulos, descripciones e "
+            "imágenes que Google combina automáticamente). Se crea en estado **PAUSADO** — revísala en "
+            "Google Ads antes de activarla."
+        )
+
+        with st.form("gads_display_form"):
+            gd1, gd2 = st.columns(2)
+            with gd1:
+                gd_camp_name = st.text_input("Nombre de la campaña *", placeholder="ej. JUL26_Display_Remarketing")
+                gd_budget    = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=5.0, step=1.0)
+                gd_final_url = st.text_input("URL de destino *", placeholder="https://cuy.pe")
+                gd_business  = st.text_input("Nombre del negocio *", value="Cuy Móvil")
+            with gd2:
+                gd_locations_es = st.multiselect(
+                    "Países *", list(GOOGLE_LOCATION_IDS.keys()), default=["Perú"],
+                )
+                gd_language_label = st.selectbox("Idioma *", list(GOOGLE_LANGUAGE_IDS.keys()))
+                gd_start_date = st.date_input("Fecha de inicio", value=date.today(), key="gd_start_date")
+
+            st.markdown("**📝 Títulos** (mínimo 3, máximo 5 — hasta 30 caracteres c/u)")
+            gd_headline_defaults = (DISPLAY_HEADLINES_BANK + [""] * 5)[:5]
+            gd_headlines = [
+                st.text_input(f"Título {i + 1}", value=gd_headline_defaults[i], key=f"gd_headline_{i}")
+                for i in range(5)
+            ]
+            gd_long_headline = st.text_input("Título largo (hasta 90 caracteres)", value=DISPLAY_LONG_HEADLINE)
+
+            st.markdown("**🧾 Descripciones** (mínimo 2, máximo 5 — hasta 90 caracteres c/u)")
+            gd_description_defaults = (DISPLAY_DESCRIPTIONS_BANK + [""] * 5)[:5]
+            gd_descriptions = [
+                st.text_input(f"Descripción {i + 1}", value=gd_description_defaults[i], key=f"gd_description_{i}")
+                for i in range(4)
+            ]
+
+            st.markdown("**🖼️ Imágenes**")
+            gi1, gi2, gi3 = st.columns(3)
+            with gi1:
+                gd_marketing_image = st.file_uploader("Imagen horizontal * (1200×628, relación 1.91:1)", type=["jpg", "jpeg", "png"], key="gd_marketing_img")
+                if gd_marketing_image:
+                    st.image(gd_marketing_image, width=180)
+            with gi2:
+                gd_square_image = st.file_uploader("Imagen cuadrada * (1200×1200, relación 1:1)", type=["jpg", "jpeg", "png"], key="gd_square_img")
+                if gd_square_image:
+                    st.image(gd_square_image, width=140)
+            with gi3:
+                gd_logo_image = st.file_uploader("Logo (opcional, 1200×1200)", type=["jpg", "jpeg", "png"], key="gd_logo_img")
+                if gd_logo_image:
+                    st.image(gd_logo_image, width=140)
+
+            gd_submitted = st.form_submit_button("🚀 Crear campaña de Display (pausada)", type="primary")
+
+        if gd_submitted:
+            gd_headlines_clean    = [h.strip() for h in gd_headlines if h.strip()]
+            gd_descriptions_clean = [d.strip() for d in gd_descriptions if d.strip()]
+            gd_missing = []
+            if not gd_camp_name:                     gd_missing.append("Nombre de campaña")
+            if not gd_final_url:                     gd_missing.append("URL de destino")
+            if not gd_business:                      gd_missing.append("Nombre del negocio")
+            if not gd_locations_es:                  gd_missing.append("Al menos un país")
+            if len(gd_headlines_clean) < 3:           gd_missing.append("Al menos 3 títulos")
+            if not gd_long_headline.strip():          gd_missing.append("Título largo")
+            if len(gd_descriptions_clean) < 2:        gd_missing.append("Al menos 2 descripciones")
+            if not gd_marketing_image:                gd_missing.append("Imagen horizontal")
+            if not gd_square_image:                   gd_missing.append("Imagen cuadrada")
+
+            if gd_missing:
+                st.warning("Faltan campos requeridos: " + "  ·  ".join(gd_missing))
+            else:
+                with st.spinner("Creando presupuesto → campaña → segmentación → grupo de anuncios → imágenes → anuncio…"):
+                    try:
+                        gd_result = create_display_campaign(
+                            customer_id=GOOGLE_ADS_CUSTOMER_ID,
+                            campaign_name=gd_camp_name,
+                            daily_budget_usd=gd_budget,
+                            final_url=gd_final_url,
+                            headlines=gd_headlines_clean,
+                            long_headline=gd_long_headline.strip(),
+                            descriptions=gd_descriptions_clean,
+                            business_name=gd_business,
+                            marketing_image_bytes=gd_marketing_image.getvalue(),
+                            square_image_bytes=gd_square_image.getvalue(),
+                            logo_image_bytes=gd_logo_image.getvalue() if gd_logo_image else None,
+                            location_ids=[GOOGLE_LOCATION_IDS[c] for c in gd_locations_es],
+                            language_id=GOOGLE_LANGUAGE_IDS[gd_language_label],
+                            start_date=gd_start_date,
+                        )
+                        st.success("✅ ¡Campaña de Display creada exitosamente en estado PAUSADO!")
+                        st.markdown(f"""
+    - 📢 Campaña: `{gd_result['campaign_resource_name']}`
+    - 👥 Grupo de anuncios: `{gd_result['ad_group_resource_name']}`
+    - 🎨 Anuncio: `{gd_result['ad_resource_name']}`
+                        """)
+                        mgr_url_gads = f"https://ads.google.com/aw/campaigns?ocid=&__u={GOOGLE_ADS_CUSTOMER_ID}"
+                        st.markdown(f"[🔗 Ir a Google Ads]({mgr_url_gads}) para revisarla y activarla cuando quieras.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"No se pudo crear la campaña de Display: {e}")
+                        st.caption(
+                            "Verifica que la cuenta autorizada tenga permisos de edición sobre esta cuenta de Google Ads, "
+                            "y que el Developer Token tenga el nivel de acceso necesario para crear campañas."
+                        )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — WEB ANALYTICS (Google Analytics 4)
