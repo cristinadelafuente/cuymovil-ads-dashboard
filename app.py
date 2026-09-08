@@ -1726,6 +1726,143 @@ def create_display_campaign(
         "ad_resource_name":       ad_response.results[0].resource_name,
     }
 
+def _gads_upload_text_asset(client, customer_id: str, text: str, asset_name: str) -> str:
+    """Sube un texto como Asset de Google Ads (usado en Performance Max) y devuelve su resource_name."""
+    asset_service = client.get_service("AssetService")
+    operation = client.get_type("AssetOperation")
+    asset = operation.create
+    asset.name = asset_name
+    asset.type_ = client.enums.AssetTypeEnum.TEXT
+    asset.text_asset.text = text
+    response = asset_service.mutate_assets(customer_id=customer_id, operations=[operation])
+    return response.results[0].resource_name
+
+def create_performance_max_campaign(
+    customer_id: str, campaign_name: str, daily_budget_usd: float, final_url: str,
+    headlines: list, long_headline: str, descriptions: list, business_name: str,
+    marketing_image_bytes: bytes, square_image_bytes: bytes, logo_image_bytes: bytes = None,
+    location_ids: list = None, language_id: str = "1003", search_themes: list = None,
+) -> dict:
+    """Crea una campaña de Performance Max de Google Ads completa (presupuesto → campaña →
+    segmentación → grupo de recursos con textos e imágenes → señales de tema de búsqueda),
+    en estado PAUSADO."""
+    client = init_google_ads_client()
+    customer_id_clean = str(customer_id).replace("-", "")
+    location_ids = location_ids or ["2604"]
+    _ts = int(datetime.now().timestamp())
+
+    # 1. Presupuesto
+    budget_service = client.get_service("CampaignBudgetService")
+    budget_operation = client.get_type("CampaignBudgetOperation")
+    budget = budget_operation.create
+    budget.name = f"Budget_{campaign_name[:40]}_{_ts}"
+    budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    budget.amount_micros = int(daily_budget_usd * 1_000_000)
+    budget_response = budget_service.mutate_campaign_budgets(customer_id=customer_id_clean, operations=[budget_operation])
+    budget_resource_name = budget_response.results[0].resource_name
+
+    # 2. Campaña de Performance Max
+    campaign_service = client.get_service("CampaignService")
+    campaign_operation = client.get_type("CampaignOperation")
+    campaign = campaign_operation.create
+    campaign.name = campaign_name
+    campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.PERFORMANCE_MAX
+    campaign.status = client.enums.CampaignStatusEnum.PAUSED
+    campaign.campaign_budget = budget_resource_name
+    campaign.maximize_conversions = client.get_type("MaximizeConversions")()
+    campaign.contains_eu_political_advertising = (
+        client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+    )
+    # Nota: la fecha de inicio no se fija por API — la campaña queda en PAUSADO y arranca a correr
+    # recién cuando la actives en Google Ads.
+    campaign_response = campaign_service.mutate_campaigns(customer_id=customer_id_clean, operations=[campaign_operation])
+    campaign_resource_name = campaign_response.results[0].resource_name
+
+    # 3. Segmentación geográfica e idioma
+    criterion_service = client.get_service("CampaignCriterionService")
+    criterion_ops = []
+    for loc_id in location_ids:
+        op = client.get_type("CampaignCriterionOperation")
+        crit = op.create
+        crit.campaign = campaign_resource_name
+        crit.location.geo_target_constant = f"geoTargetConstants/{loc_id}"
+        criterion_ops.append(op)
+    lang_op = client.get_type("CampaignCriterionOperation")
+    lang_crit = lang_op.create
+    lang_crit.campaign = campaign_resource_name
+    lang_crit.language.language_constant = f"languageConstants/{language_id}"
+    criterion_ops.append(lang_op)
+    criterion_service.mutate_campaign_criteria(customer_id=customer_id_clean, operations=criterion_ops)
+
+    # 4. Grupo de recursos (Asset Group)
+    asset_group_service = client.get_service("AssetGroupService")
+    ag_operation = client.get_type("AssetGroupOperation")
+    ag = ag_operation.create
+    ag.name = f"{campaign_name}_AssetGroup"
+    ag.campaign = campaign_resource_name
+    ag.final_urls.append(final_url)
+    ag.status = client.enums.AssetGroupStatusEnum.ENABLED
+    ag_response = asset_group_service.mutate_asset_groups(customer_id=customer_id_clean, operations=[ag_operation])
+    asset_group_resource_name = ag_response.results[0].resource_name
+
+    # 5. Imágenes como Assets (ajustadas al ratio exacto que exige Google Ads)
+    marketing_image_fitted = _gads_fit_image_to_ratio(marketing_image_bytes, (1200, 628))
+    square_image_fitted    = _gads_fit_image_to_ratio(square_image_bytes, (1200, 1200))
+    marketing_image_asset = _gads_upload_image_asset(client, customer_id_clean, marketing_image_fitted, f"{campaign_name}_marketing_{_ts}")
+    square_image_asset    = _gads_upload_image_asset(client, customer_id_clean, square_image_fitted, f"{campaign_name}_square_{_ts}")
+    logo_image_asset = None
+    if logo_image_bytes:
+        logo_image_fitted = _gads_fit_image_to_ratio(logo_image_bytes, (1200, 1200))
+        logo_image_asset = _gads_upload_image_asset(client, customer_id_clean, logo_image_fitted, f"{campaign_name}_logo_{_ts}")
+
+    # 6. Textos como Assets (títulos, título largo, descripciones, nombre del negocio)
+    headline_assets = [_gads_upload_text_asset(client, customer_id_clean, h, f"{campaign_name}_headline_{i}_{_ts}") for i, h in enumerate(headlines[:15])]
+    long_headline_asset = _gads_upload_text_asset(client, customer_id_clean, long_headline, f"{campaign_name}_longheadline_{_ts}")
+    description_assets = [_gads_upload_text_asset(client, customer_id_clean, d, f"{campaign_name}_description_{i}_{_ts}") for i, d in enumerate(descriptions[:5])]
+    business_name_asset = _gads_upload_text_asset(client, customer_id_clean, business_name, f"{campaign_name}_business_{_ts}")
+
+    # 7. Vincular todos los assets al grupo de recursos
+    asset_group_asset_service = client.get_service("AssetGroupAssetService")
+    aga_ops = []
+
+    def _link_asset(asset_resource_name, field_type_enum_name):
+        op = client.get_type("AssetGroupAssetOperation")
+        aga = op.create
+        aga.asset_group = asset_group_resource_name
+        aga.asset = asset_resource_name
+        aga.field_type = getattr(client.enums.AssetFieldTypeEnum, field_type_enum_name)
+        aga_ops.append(op)
+
+    for h_asset in headline_assets:
+        _link_asset(h_asset, "HEADLINE")
+    _link_asset(long_headline_asset, "LONG_HEADLINE")
+    for d_asset in description_assets:
+        _link_asset(d_asset, "DESCRIPTION")
+    _link_asset(business_name_asset, "BUSINESS_NAME")
+    _link_asset(marketing_image_asset, "MARKETING_IMAGE")
+    _link_asset(square_image_asset, "SQUARE_MARKETING_IMAGE")
+    if logo_image_asset:
+        _link_asset(logo_image_asset, "LOGO")
+    asset_group_asset_service.mutate_asset_group_assets(customer_id=customer_id_clean, operations=aga_ops)
+
+    # 8. Señales de tema de búsqueda (opcional) — le dicen a Google qué buscan las personas que
+    # queremos alcanzar; no reemplazan audiencias, pero son la señal más simple y confiable de Pmax.
+    if search_themes:
+        signal_service = client.get_service("AssetGroupSignalService")
+        signal_ops = []
+        for theme in search_themes[:25]:
+            op = client.get_type("AssetGroupSignalOperation")
+            sig = op.create
+            sig.asset_group = asset_group_resource_name
+            sig.search_theme.text = theme
+            signal_ops.append(op)
+        signal_service.mutate_asset_group_signals(customer_id=customer_id_clean, operations=signal_ops)
+
+    return {
+        "campaign_resource_name":    campaign_resource_name,
+        "asset_group_resource_name": asset_group_resource_name,
+    }
+
 def generate_google_display_recommendations(gads_df: pd.DataFrame) -> dict:
     """Genera una recomendación de contenidos para Display basada en el rendimiento real de la campaña
     de marca (branded) de Google Ads — basado en reglas, sin usar una IA de pago."""
@@ -3884,6 +4021,121 @@ elif nav_section == "🔍 Google Ads":
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"No se pudo crear la campaña de Display: {e}")
+                        st.caption(
+                            "Verifica que la cuenta autorizada tenga permisos de edición sobre esta cuenta de Google Ads, "
+                            "y que el Developer Token tenga el nivel de acceso necesario para crear campañas."
+                        )
+
+        st.divider()
+
+        # ── Crear campaña de Performance Max (Google Ads) ───────────────────────────
+        st.subheader("🚀 Crear campaña de Performance Max")
+        st.caption(
+            "Crea una campaña de Performance Max con un solo grupo de recursos (títulos, descripciones "
+            "e imágenes que Google combina y distribuye en Búsqueda, Display, YouTube, Gmail y Maps). "
+            "Se crea en estado **PAUSADO** — revísala en Google Ads antes de activarla. "
+            "Nota: por ahora no incluye señales de audiencia (listas de remarketing / afinidad) como sí "
+            "tiene Display — solo temas de búsqueda, que son la señal más simple y confiable en Pmax."
+        )
+
+        with st.form("gads_pmax_form"):
+            pm1, pm2 = st.columns(2)
+            with pm1:
+                pm_camp_name = st.text_input("Nombre de la campaña *", placeholder="ej. SEP26_Pmax_Cambiatesindramas")
+                pm_budget    = st.number_input("Presupuesto diario (USD) *", min_value=1.0, value=5.0, step=1.0, key="pm_budget")
+                pm_final_url = st.text_input("URL de destino *", placeholder="https://cuy.pe", key="pm_final_url")
+                pm_business  = st.text_input("Nombre del negocio *", value="Cuy Móvil", key="pm_business")
+            with pm2:
+                pm_locations_es = st.multiselect(
+                    "Países *", list(GOOGLE_LOCATION_IDS.keys()), default=["Perú"], key="pm_locations",
+                )
+                pm_language_label = st.selectbox("Idioma *", list(GOOGLE_LANGUAGE_IDS.keys()), key="pm_language")
+                st.caption("La campaña se crea **PAUSADA** — define la fecha de inicio directamente en Google Ads al activarla.")
+
+            st.markdown("**📝 Títulos** (mínimo 3, máximo 15 — hasta 30 caracteres c/u)")
+            pm_headline_defaults = (DISPLAY_HEADLINES_BANK + [""] * 5)[:5]
+            pm_headlines = [
+                st.text_input(f"Título {i + 1}", value=pm_headline_defaults[i], key=f"pm_headline_{i}")
+                for i in range(5)
+            ]
+            pm_long_headline = st.text_input("Título largo (hasta 90 caracteres)", value=DISPLAY_LONG_HEADLINE, key="pm_long_headline")
+
+            st.markdown("**🧾 Descripciones** (mínimo 2, máximo 5 — hasta 90 caracteres c/u)")
+            pm_description_defaults = (DISPLAY_DESCRIPTIONS_BANK + [""] * 5)[:5]
+            pm_descriptions = [
+                st.text_input(f"Descripción {i + 1}", value=pm_description_defaults[i], key=f"pm_description_{i}")
+                for i in range(4)
+            ]
+
+            st.markdown("**🔎 Temas de búsqueda** (opcional, hasta 25 — uno por línea)")
+            pm_search_themes_raw = st.text_area(
+                "Temas de búsqueda", placeholder="planes móviles Perú\nchip liberado\nportabilidad Claro\nllamadas ilimitadas",
+                key="pm_search_themes", label_visibility="collapsed",
+            )
+
+            st.markdown("**🖼️ Imágenes**")
+            pi1, pi2, pi3 = st.columns(3)
+            with pi1:
+                pm_marketing_image = st.file_uploader("Imagen horizontal * (1200×628, relación 1.91:1)", type=["jpg", "jpeg", "png"], key="pm_marketing_img")
+                if pm_marketing_image:
+                    st.image(pm_marketing_image, width=180)
+            with pi2:
+                pm_square_image = st.file_uploader("Imagen cuadrada * (1200×1200, relación 1:1)", type=["jpg", "jpeg", "png"], key="pm_square_img")
+                if pm_square_image:
+                    st.image(pm_square_image, width=140)
+            with pi3:
+                pm_logo_image = st.file_uploader("Logo (opcional, 1200×1200)", type=["jpg", "jpeg", "png"], key="pm_logo_img")
+                if pm_logo_image:
+                    st.image(pm_logo_image, width=140)
+
+            pm_submitted = st.form_submit_button("🚀 Crear campaña de Performance Max (pausada)", type="primary")
+
+        if pm_submitted:
+            pm_headlines_clean    = [h.strip() for h in pm_headlines if h.strip()]
+            pm_descriptions_clean = [d.strip() for d in pm_descriptions if d.strip()]
+            pm_search_themes_clean = [t.strip() for t in pm_search_themes_raw.splitlines() if t.strip()]
+            pm_missing = []
+            if not pm_camp_name:                     pm_missing.append("Nombre de campaña")
+            if not pm_final_url:                     pm_missing.append("URL de destino")
+            if not pm_business:                      pm_missing.append("Nombre del negocio")
+            if not pm_locations_es:                  pm_missing.append("Al menos un país")
+            if len(pm_headlines_clean) < 3:          pm_missing.append("Al menos 3 títulos")
+            if not pm_long_headline.strip():         pm_missing.append("Título largo")
+            if len(pm_descriptions_clean) < 2:       pm_missing.append("Al menos 2 descripciones")
+            if not pm_marketing_image:               pm_missing.append("Imagen horizontal")
+            if not pm_square_image:                  pm_missing.append("Imagen cuadrada")
+
+            if pm_missing:
+                st.warning("Faltan campos requeridos: " + "  ·  ".join(pm_missing))
+            else:
+                with st.spinner("Creando presupuesto → campaña → segmentación → grupo de recursos → textos → imágenes → señales…"):
+                    try:
+                        pm_result = create_performance_max_campaign(
+                            customer_id=GOOGLE_ADS_CUSTOMER_ID,
+                            campaign_name=pm_camp_name,
+                            daily_budget_usd=pm_budget,
+                            final_url=pm_final_url,
+                            headlines=pm_headlines_clean,
+                            long_headline=pm_long_headline.strip(),
+                            descriptions=pm_descriptions_clean,
+                            business_name=pm_business,
+                            marketing_image_bytes=pm_marketing_image.getvalue(),
+                            square_image_bytes=pm_square_image.getvalue(),
+                            logo_image_bytes=pm_logo_image.getvalue() if pm_logo_image else None,
+                            location_ids=[GOOGLE_LOCATION_IDS[c] for c in pm_locations_es],
+                            language_id=GOOGLE_LANGUAGE_IDS[pm_language_label],
+                            search_themes=pm_search_themes_clean,
+                        )
+                        st.success("✅ ¡Campaña de Performance Max creada exitosamente en estado PAUSADO!")
+                        st.markdown(f"""
+    - 📢 Campaña: `{pm_result['campaign_resource_name']}`
+    - 📦 Grupo de recursos: `{pm_result['asset_group_resource_name']}`
+                        """)
+                        mgr_url_pmax = f"https://ads.google.com/aw/campaigns?ocid=&__u={GOOGLE_ADS_CUSTOMER_ID}"
+                        st.markdown(f"[🔗 Ir a Google Ads]({mgr_url_pmax}) para revisarla y activarla cuando quieras.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"No se pudo crear la campaña de Performance Max: {e}")
                         st.caption(
                             "Verifica que la cuenta autorizada tenga permisos de edición sobre esta cuenta de Google Ads, "
                             "y que el Developer Token tenga el nivel de acceso necesario para crear campañas."
