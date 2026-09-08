@@ -1861,6 +1861,25 @@ def create_performance_max_campaign(
         _link_asset(p_asset, "PORTRAIT_MARKETING_IMAGE")
     asset_group_asset_service.mutate_asset_group_assets(customer_id=customer_id_clean, operations=aga_ops)
 
+    # 7bis. Directrices de marca (Brand Guidelines) — si la cuenta las tiene activadas, Google exige
+    # además vincular el nombre del negocio y un logo cuadrado a nivel de CAMPAÑA (no solo al grupo
+    # de recursos). Si no subieron logo, se reutiliza la primera imagen cuadrada como logo de marca.
+    campaign_asset_service = client.get_service("CampaignAssetService")
+    ca_ops = []
+
+    def _link_campaign_asset(asset_resource_name, field_type_enum_name):
+        op = client.get_type("CampaignAssetOperation")
+        ca = op.create
+        ca.campaign = campaign_resource_name
+        ca.asset = asset_resource_name
+        ca.field_type = getattr(client.enums.AssetFieldTypeEnum, field_type_enum_name)
+        ca_ops.append(op)
+
+    _link_campaign_asset(business_name_asset, "BUSINESS_NAME")
+    brand_logo_asset = (logo_image_assets or square_image_assets)[0]
+    _link_campaign_asset(brand_logo_asset, "LOGO")
+    campaign_asset_service.mutate_campaign_assets(customer_id=customer_id_clean, operations=ca_ops)
+
     # 8. Señales de tema de búsqueda (opcional) — le dicen a Google qué buscan las personas que
     # queremos alcanzar; no reemplazan audiencias, pero son la señal más simple y confiable de Pmax.
     if search_themes:
