@@ -1788,7 +1788,6 @@ def create_performance_max_campaign(
     long_headline_asset = _gads_upload_text_asset(client, customer_id_clean, long_headline, f"{campaign_name}_longheadline_{_ts}")
     description_assets = [_gads_upload_text_asset(client, customer_id_clean, d, f"{campaign_name}_description_{i}_{_ts}") for i, d in enumerate(descriptions[:5])]
     business_name_asset = _gads_upload_text_asset(client, customer_id_clean, business_name, f"{campaign_name}_business_{_ts}")
-    brand_logo_asset = (logo_image_assets or square_image_assets)[0]
 
     # 3. Campaña de Performance Max — creada en la MISMA operación atómica que el vínculo de
     # nombre de negocio y logo a nivel de campaña (requisito de "Brand Guidelines").
@@ -1813,23 +1812,32 @@ def create_performance_max_campaign(
     biz_ca.asset = business_name_asset
     biz_ca.field_type = client.enums.AssetFieldTypeEnum.BUSINESS_NAME
 
-    logo_ca_operation = client.get_type("CampaignAssetOperation")
-    logo_ca = logo_ca_operation.create
-    logo_ca.campaign = campaign_temp_resource_name
-    logo_ca.asset = brand_logo_asset
-    logo_ca.field_type = client.enums.AssetFieldTypeEnum.LOGO
+    # Todas las imágenes cuadradas/logo se vinculan como logo de marca a nivel de campaña — con
+    # "Brand Guidelines" activado, ese es el único lugar donde Google acepta el campo LOGO.
+    brand_logo_pool = logo_image_assets or square_image_assets
+    logo_ca_operations = []
+    for logo_asset in brand_logo_pool:
+        op = client.get_type("CampaignAssetOperation")
+        ca = op.create
+        ca.campaign = campaign_temp_resource_name
+        ca.asset = logo_asset
+        ca.field_type = client.enums.AssetFieldTypeEnum.LOGO
+        logo_ca_operations.append(op)
 
     mutate_op_campaign = client.get_type("MutateOperation")
     mutate_op_campaign.campaign_operation = campaign_operation
     mutate_op_biz = client.get_type("MutateOperation")
     mutate_op_biz.campaign_asset_operation = biz_ca_operation
-    mutate_op_logo = client.get_type("MutateOperation")
-    mutate_op_logo.campaign_asset_operation = logo_ca_operation
+    mutate_ops_logo = []
+    for logo_op in logo_ca_operations:
+        mop = client.get_type("MutateOperation")
+        mop.campaign_asset_operation = logo_op
+        mutate_ops_logo.append(mop)
 
     google_ads_service = client.get_service("GoogleAdsService")
     batch_response = google_ads_service.mutate(
         customer_id=customer_id_clean,
-        mutate_operations=[mutate_op_campaign, mutate_op_biz, mutate_op_logo],
+        mutate_operations=[mutate_op_campaign, mutate_op_biz] + mutate_ops_logo,
     )
     campaign_resource_name = batch_response.mutate_operation_responses[0].campaign_result.resource_name
 
@@ -1874,18 +1882,18 @@ def create_performance_max_campaign(
         mutate_op.asset_group_asset_operation = op
         ag_mutate_ops.append(mutate_op)
 
+    # Nota: con "Brand Guidelines" activado, el nombre del negocio y el logo van SOLO como
+    # CampaignAsset (ya vinculados en el paso 3) — Google rechaza vincularlos también aquí,
+    # a nivel de grupo de recursos.
     for h_asset in headline_assets:
         _link_asset(h_asset, "HEADLINE")
     _link_asset(long_headline_asset, "LONG_HEADLINE")
     for d_asset in description_assets:
         _link_asset(d_asset, "DESCRIPTION")
-    _link_asset(business_name_asset, "BUSINESS_NAME")
     for m_asset in marketing_image_assets:
         _link_asset(m_asset, "MARKETING_IMAGE")
     for s_asset in square_image_assets:
         _link_asset(s_asset, "SQUARE_MARKETING_IMAGE")
-    for l_asset in logo_image_assets:
-        _link_asset(l_asset, "LOGO")
     for p_asset in portrait_image_assets:
         _link_asset(p_asset, "PORTRAIT_MARKETING_IMAGE")
 
