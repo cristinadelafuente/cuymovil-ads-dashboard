@@ -1740,7 +1740,8 @@ def _gads_upload_text_asset(client, customer_id: str, text: str, asset_name: str
 def create_performance_max_campaign(
     customer_id: str, campaign_name: str, daily_budget_usd: float, final_url: str,
     headlines: list, long_headline: str, descriptions: list, business_name: str,
-    marketing_image_bytes: bytes, square_image_bytes: bytes, logo_image_bytes: bytes = None,
+    marketing_images_bytes: list, square_images_bytes: list,
+    logo_images_bytes: list = None, portrait_images_bytes: list = None,
     location_ids: list = None, language_id: str = "1003", search_themes: list = None,
 ) -> dict:
     """Crea una campaña de Performance Max de Google Ads completa (presupuesto → campaña →
@@ -1805,15 +1806,24 @@ def create_performance_max_campaign(
     ag_response = asset_group_service.mutate_asset_groups(customer_id=customer_id_clean, operations=[ag_operation])
     asset_group_resource_name = ag_response.results[0].resource_name
 
-    # 5. Imágenes como Assets (ajustadas al ratio exacto que exige Google Ads)
-    marketing_image_fitted = _gads_fit_image_to_ratio(marketing_image_bytes, (1200, 628))
-    square_image_fitted    = _gads_fit_image_to_ratio(square_image_bytes, (1200, 1200))
-    marketing_image_asset = _gads_upload_image_asset(client, customer_id_clean, marketing_image_fitted, f"{campaign_name}_marketing_{_ts}")
-    square_image_asset    = _gads_upload_image_asset(client, customer_id_clean, square_image_fitted, f"{campaign_name}_square_{_ts}")
-    logo_image_asset = None
-    if logo_image_bytes:
-        logo_image_fitted = _gads_fit_image_to_ratio(logo_image_bytes, (1200, 1200))
-        logo_image_asset = _gads_upload_image_asset(client, customer_id_clean, logo_image_fitted, f"{campaign_name}_logo_{_ts}")
+    # 5. Imágenes como Assets (ajustadas al ratio exacto que exige Google Ads) — se admite más de
+    # una por tipo; Google las combina y prueba automáticamente entre sí.
+    marketing_image_assets = [
+        _gads_upload_image_asset(client, customer_id_clean, _gads_fit_image_to_ratio(b, (1200, 628)), f"{campaign_name}_marketing_{i}_{_ts}")
+        for i, b in enumerate(marketing_images_bytes[:20])
+    ]
+    square_image_assets = [
+        _gads_upload_image_asset(client, customer_id_clean, _gads_fit_image_to_ratio(b, (1200, 1200)), f"{campaign_name}_square_{i}_{_ts}")
+        for i, b in enumerate(square_images_bytes[:20])
+    ]
+    logo_image_assets = [
+        _gads_upload_image_asset(client, customer_id_clean, _gads_fit_image_to_ratio(b, (1200, 1200)), f"{campaign_name}_logo_{i}_{_ts}")
+        for i, b in enumerate((logo_images_bytes or [])[:5])
+    ]
+    portrait_image_assets = [
+        _gads_upload_image_asset(client, customer_id_clean, _gads_fit_image_to_ratio(b, (960, 1200)), f"{campaign_name}_portrait_{i}_{_ts}")
+        for i, b in enumerate((portrait_images_bytes or [])[:20])
+    ]
 
     # 6. Textos como Assets (títulos, título largo, descripciones, nombre del negocio)
     headline_assets = [_gads_upload_text_asset(client, customer_id_clean, h, f"{campaign_name}_headline_{i}_{_ts}") for i, h in enumerate(headlines[:15])]
@@ -1839,10 +1849,14 @@ def create_performance_max_campaign(
     for d_asset in description_assets:
         _link_asset(d_asset, "DESCRIPTION")
     _link_asset(business_name_asset, "BUSINESS_NAME")
-    _link_asset(marketing_image_asset, "MARKETING_IMAGE")
-    _link_asset(square_image_asset, "SQUARE_MARKETING_IMAGE")
-    if logo_image_asset:
-        _link_asset(logo_image_asset, "LOGO")
+    for m_asset in marketing_image_assets:
+        _link_asset(m_asset, "MARKETING_IMAGE")
+    for s_asset in square_image_assets:
+        _link_asset(s_asset, "SQUARE_MARKETING_IMAGE")
+    for l_asset in logo_image_assets:
+        _link_asset(l_asset, "LOGO")
+    for p_asset in portrait_image_assets:
+        _link_asset(p_asset, "PORTRAIT_MARKETING_IMAGE")
     asset_group_asset_service.mutate_asset_group_assets(customer_id=customer_id_clean, operations=aga_ops)
 
     # 8. Señales de tema de búsqueda (opcional) — le dicen a Google qué buscan las personas que
@@ -4073,20 +4087,38 @@ elif nav_section == "🔍 Google Ads":
                 key="pm_search_themes", label_visibility="collapsed",
             )
 
-            st.markdown("**🖼️ Imágenes**")
-            pi1, pi2, pi3 = st.columns(3)
+            st.markdown("**🖼️ Imágenes** — puedes subir varias piezas de arte por tipo; Google las combina y prueba entre sí automáticamente.")
+            pi1, pi2 = st.columns(2)
             with pi1:
-                pm_marketing_image = st.file_uploader("Imagen horizontal * (1200×628, relación 1.91:1)", type=["jpg", "jpeg", "png"], key="pm_marketing_img")
-                if pm_marketing_image:
-                    st.image(pm_marketing_image, width=180)
+                pm_marketing_images = st.file_uploader(
+                    "Imágenes horizontales * (1200×628, relación 1.91:1 — hasta 20)",
+                    type=["jpg", "jpeg", "png"], key="pm_marketing_imgs", accept_multiple_files=True,
+                )
+                if pm_marketing_images:
+                    st.image([f for f in pm_marketing_images], width=140)
             with pi2:
-                pm_square_image = st.file_uploader("Imagen cuadrada * (1200×1200, relación 1:1)", type=["jpg", "jpeg", "png"], key="pm_square_img")
-                if pm_square_image:
-                    st.image(pm_square_image, width=140)
+                pm_square_images = st.file_uploader(
+                    "Imágenes cuadradas * (1200×1200, relación 1:1 — hasta 20)",
+                    type=["jpg", "jpeg", "png"], key="pm_square_imgs", accept_multiple_files=True,
+                )
+                if pm_square_images:
+                    st.image([f for f in pm_square_images], width=120)
+
+            pi3, pi4 = st.columns(2)
             with pi3:
-                pm_logo_image = st.file_uploader("Logo (opcional, 1200×1200)", type=["jpg", "jpeg", "png"], key="pm_logo_img")
-                if pm_logo_image:
-                    st.image(pm_logo_image, width=140)
+                pm_logo_images = st.file_uploader(
+                    "Logos (opcional, 1200×1200 — hasta 5)",
+                    type=["jpg", "jpeg", "png"], key="pm_logo_imgs", accept_multiple_files=True,
+                )
+                if pm_logo_images:
+                    st.image([f for f in pm_logo_images], width=100)
+            with pi4:
+                pm_portrait_images = st.file_uploader(
+                    "Imágenes verticales (opcional, relación 4:5 — hasta 20)",
+                    type=["jpg", "jpeg", "png"], key="pm_portrait_imgs", accept_multiple_files=True,
+                )
+                if pm_portrait_images:
+                    st.image([f for f in pm_portrait_images], width=100)
 
             pm_submitted = st.form_submit_button("🚀 Crear campaña de Performance Max (pausada)", type="primary")
 
@@ -4102,8 +4134,8 @@ elif nav_section == "🔍 Google Ads":
             if len(pm_headlines_clean) < 3:          pm_missing.append("Al menos 3 títulos")
             if not pm_long_headline.strip():         pm_missing.append("Título largo")
             if len(pm_descriptions_clean) < 2:       pm_missing.append("Al menos 2 descripciones")
-            if not pm_marketing_image:               pm_missing.append("Imagen horizontal")
-            if not pm_square_image:                  pm_missing.append("Imagen cuadrada")
+            if not pm_marketing_images:              pm_missing.append("Al menos 1 imagen horizontal")
+            if not pm_square_images:                 pm_missing.append("Al menos 1 imagen cuadrada")
 
             if pm_missing:
                 st.warning("Faltan campos requeridos: " + "  ·  ".join(pm_missing))
@@ -4119,9 +4151,10 @@ elif nav_section == "🔍 Google Ads":
                             long_headline=pm_long_headline.strip(),
                             descriptions=pm_descriptions_clean,
                             business_name=pm_business,
-                            marketing_image_bytes=pm_marketing_image.getvalue(),
-                            square_image_bytes=pm_square_image.getvalue(),
-                            logo_image_bytes=pm_logo_image.getvalue() if pm_logo_image else None,
+                            marketing_images_bytes=[f.getvalue() for f in pm_marketing_images],
+                            square_images_bytes=[f.getvalue() for f in pm_square_images],
+                            logo_images_bytes=[f.getvalue() for f in pm_logo_images] if pm_logo_images else None,
+                            portrait_images_bytes=[f.getvalue() for f in pm_portrait_images] if pm_portrait_images else None,
                             location_ids=[GOOGLE_LOCATION_IDS[c] for c in pm_locations_es],
                             language_id=GOOGLE_LANGUAGE_IDS[pm_language_label],
                             search_themes=pm_search_themes_clean,
