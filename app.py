@@ -1849,28 +1849,30 @@ def create_performance_max_campaign(
     criterion_ops.append(lang_op)
     criterion_service.mutate_campaign_criteria(customer_id=customer_id_clean, operations=criterion_ops)
 
-    # 5. Grupo de recursos (Asset Group)
-    asset_group_service = client.get_service("AssetGroupService")
+    # 5-6. Grupo de recursos (Asset Group) + vincular todos los assets — en UNA sola operación
+    # atómica, porque Google exige que el grupo de recursos ya nazca con el mínimo de assets
+    # requeridos (títulos, título largo, descripciones, imagen horizontal y cuadrada).
+    asset_group_temp_resource_name = f"customers/{customer_id_clean}/assetGroups/-1"
     ag_operation = client.get_type("AssetGroupOperation")
     ag = ag_operation.create
+    ag.resource_name = asset_group_temp_resource_name
     ag.name = f"{campaign_name}_AssetGroup"
     ag.campaign = campaign_resource_name
     ag.final_urls.append(final_url)
     ag.status = client.enums.AssetGroupStatusEnum.ENABLED
-    ag_response = asset_group_service.mutate_asset_groups(customer_id=customer_id_clean, operations=[ag_operation])
-    asset_group_resource_name = ag_response.results[0].resource_name
 
-    # 6. Vincular todos los assets al grupo de recursos
-    asset_group_asset_service = client.get_service("AssetGroupAssetService")
-    aga_ops = []
+    ag_mutate_ops = [client.get_type("MutateOperation")]
+    ag_mutate_ops[0].asset_group_operation = ag_operation
 
     def _link_asset(asset_resource_name, field_type_enum_name):
         op = client.get_type("AssetGroupAssetOperation")
         aga = op.create
-        aga.asset_group = asset_group_resource_name
+        aga.asset_group = asset_group_temp_resource_name
         aga.asset = asset_resource_name
         aga.field_type = getattr(client.enums.AssetFieldTypeEnum, field_type_enum_name)
-        aga_ops.append(op)
+        mutate_op = client.get_type("MutateOperation")
+        mutate_op.asset_group_asset_operation = op
+        ag_mutate_ops.append(mutate_op)
 
     for h_asset in headline_assets:
         _link_asset(h_asset, "HEADLINE")
@@ -1886,7 +1888,9 @@ def create_performance_max_campaign(
         _link_asset(l_asset, "LOGO")
     for p_asset in portrait_image_assets:
         _link_asset(p_asset, "PORTRAIT_MARKETING_IMAGE")
-    asset_group_asset_service.mutate_asset_group_assets(customer_id=customer_id_clean, operations=aga_ops)
+
+    ag_batch_response = google_ads_service.mutate(customer_id=customer_id_clean, mutate_operations=ag_mutate_ops)
+    asset_group_resource_name = ag_batch_response.mutate_operation_responses[0].asset_group_result.resource_name
 
     # 7. Señales de tema de búsqueda (opcional) — le dicen a Google qué buscan las personas que
     # queremos alcanzar; no reemplazan audiencias, pero son la señal más simple y confiable de Pmax.
