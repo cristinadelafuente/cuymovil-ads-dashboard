@@ -1542,15 +1542,20 @@ def _gads_fit_image_to_ratio(image_bytes: bytes, target_ratio: float) -> bytes:
     img = Image.open(BytesIO(image_bytes))
     img = img.convert("RGB")
     w, h = img.size
-    current_ratio = w / h
-    if abs(current_ratio - target_ratio) < 0.01:
-        new_w, new_h = w, h
-    elif current_ratio > target_ratio:
+    # Recorta siempre al ratio exacto (sin tolerancia): Google Ads no acepta desvíos, ni siquiera
+    # de 1-2 px, así que no nos arriesgamos a "dejar pasar" imágenes casi-cuadradas.
+    if target_ratio >= 1.0:
         new_h = h
-        new_w = int(round(h * target_ratio))
+        new_w = int(h * target_ratio)
+        if new_w > w:
+            new_w = w
+            new_h = int(w / target_ratio)
     else:
         new_w = w
-        new_h = int(round(w / target_ratio))
+        new_h = int(w / target_ratio)
+        if new_h > h:
+            new_h = h
+            new_w = int(h * target_ratio)
     left = (w - new_w) // 2
     top = (h - new_h) // 2
     img = img.crop((left, top, left + new_w, top + new_h))
