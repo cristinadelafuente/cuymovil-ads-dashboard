@@ -1759,6 +1759,8 @@ def create_performance_max_campaign(
     budget.name = f"Budget_{campaign_name[:40]}_{_ts}"
     budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
     budget.amount_micros = int(daily_budget_usd * 1_000_000)
+    # Performance Max exige un presupuesto exclusivo (no compartido con otras campañas).
+    budget.explicitly_shared = False
     budget_response = budget_service.mutate_campaign_budgets(customer_id=customer_id_clean, operations=[budget_operation])
     budget_resource_name = budget_response.results[0].resource_name
 
