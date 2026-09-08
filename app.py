@@ -1764,52 +1764,10 @@ def create_performance_max_campaign(
     budget_response = budget_service.mutate_campaign_budgets(customer_id=customer_id_clean, operations=[budget_operation])
     budget_resource_name = budget_response.results[0].resource_name
 
-    # 2. Campaña de Performance Max
-    campaign_service = client.get_service("CampaignService")
-    campaign_operation = client.get_type("CampaignOperation")
-    campaign = campaign_operation.create
-    campaign.name = campaign_name
-    campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.PERFORMANCE_MAX
-    campaign.status = client.enums.CampaignStatusEnum.PAUSED
-    campaign.campaign_budget = budget_resource_name
-    campaign.maximize_conversions = client.get_type("MaximizeConversions")
-    campaign.contains_eu_political_advertising = (
-        client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
-    )
-    # Nota: la fecha de inicio no se fija por API — la campaña queda en PAUSADO y arranca a correr
-    # recién cuando la actives en Google Ads.
-    campaign_response = campaign_service.mutate_campaigns(customer_id=customer_id_clean, operations=[campaign_operation])
-    campaign_resource_name = campaign_response.results[0].resource_name
-
-    # 3. Segmentación geográfica e idioma
-    criterion_service = client.get_service("CampaignCriterionService")
-    criterion_ops = []
-    for loc_id in location_ids:
-        op = client.get_type("CampaignCriterionOperation")
-        crit = op.create
-        crit.campaign = campaign_resource_name
-        crit.location.geo_target_constant = f"geoTargetConstants/{loc_id}"
-        criterion_ops.append(op)
-    lang_op = client.get_type("CampaignCriterionOperation")
-    lang_crit = lang_op.create
-    lang_crit.campaign = campaign_resource_name
-    lang_crit.language.language_constant = f"languageConstants/{language_id}"
-    criterion_ops.append(lang_op)
-    criterion_service.mutate_campaign_criteria(customer_id=customer_id_clean, operations=criterion_ops)
-
-    # 4. Grupo de recursos (Asset Group)
-    asset_group_service = client.get_service("AssetGroupService")
-    ag_operation = client.get_type("AssetGroupOperation")
-    ag = ag_operation.create
-    ag.name = f"{campaign_name}_AssetGroup"
-    ag.campaign = campaign_resource_name
-    ag.final_urls.append(final_url)
-    ag.status = client.enums.AssetGroupStatusEnum.ENABLED
-    ag_response = asset_group_service.mutate_asset_groups(customer_id=customer_id_clean, operations=[ag_operation])
-    asset_group_resource_name = ag_response.results[0].resource_name
-
-    # 5. Imágenes como Assets (ajustadas al ratio exacto que exige Google Ads) — se admite más de
-    # una por tipo; Google las combina y prueba automáticamente entre sí.
+    # 2. Imágenes y textos como Assets (ajustados al ratio exacto que exige Google Ads) — se suben
+    # ANTES de crear la campaña porque, con "Brand Guidelines" activado en la cuenta, Google exige
+    # que el nombre del negocio y un logo cuadrado ya existan para vincularlos en el mismo momento
+    # en que se crea la campaña.
     marketing_image_assets = [
         _gads_upload_image_asset(client, customer_id_clean, _gads_fit_image_to_ratio(b, (1200, 628)), f"{campaign_name}_marketing_{i}_{_ts}")
         for i, b in enumerate(marketing_images_bytes[:20])
@@ -1826,14 +1784,83 @@ def create_performance_max_campaign(
         _gads_upload_image_asset(client, customer_id_clean, _gads_fit_image_to_ratio(b, (960, 1200)), f"{campaign_name}_portrait_{i}_{_ts}")
         for i, b in enumerate((portrait_images_bytes or [])[:20])
     ]
-
-    # 6. Textos como Assets (títulos, título largo, descripciones, nombre del negocio)
     headline_assets = [_gads_upload_text_asset(client, customer_id_clean, h, f"{campaign_name}_headline_{i}_{_ts}") for i, h in enumerate(headlines[:15])]
     long_headline_asset = _gads_upload_text_asset(client, customer_id_clean, long_headline, f"{campaign_name}_longheadline_{_ts}")
     description_assets = [_gads_upload_text_asset(client, customer_id_clean, d, f"{campaign_name}_description_{i}_{_ts}") for i, d in enumerate(descriptions[:5])]
     business_name_asset = _gads_upload_text_asset(client, customer_id_clean, business_name, f"{campaign_name}_business_{_ts}")
+    brand_logo_asset = (logo_image_assets or square_image_assets)[0]
 
-    # 7. Vincular todos los assets al grupo de recursos
+    # 3. Campaña de Performance Max — creada en la MISMA operación atómica que el vínculo de
+    # nombre de negocio y logo a nivel de campaña (requisito de "Brand Guidelines").
+    campaign_temp_resource_name = f"customers/{customer_id_clean}/campaigns/-1"
+    campaign_operation = client.get_type("CampaignOperation")
+    campaign = campaign_operation.create
+    campaign.resource_name = campaign_temp_resource_name
+    campaign.name = campaign_name
+    campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.PERFORMANCE_MAX
+    campaign.status = client.enums.CampaignStatusEnum.PAUSED
+    campaign.campaign_budget = budget_resource_name
+    campaign.maximize_conversions = client.get_type("MaximizeConversions")
+    campaign.contains_eu_political_advertising = (
+        client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+    )
+    # Nota: la fecha de inicio no se fija por API — la campaña queda en PAUSADO y arranca a correr
+    # recién cuando la actives en Google Ads.
+
+    biz_ca_operation = client.get_type("CampaignAssetOperation")
+    biz_ca = biz_ca_operation.create
+    biz_ca.campaign = campaign_temp_resource_name
+    biz_ca.asset = business_name_asset
+    biz_ca.field_type = client.enums.AssetFieldTypeEnum.BUSINESS_NAME
+
+    logo_ca_operation = client.get_type("CampaignAssetOperation")
+    logo_ca = logo_ca_operation.create
+    logo_ca.campaign = campaign_temp_resource_name
+    logo_ca.asset = brand_logo_asset
+    logo_ca.field_type = client.enums.AssetFieldTypeEnum.LOGO
+
+    mutate_op_campaign = client.get_type("MutateOperation")
+    mutate_op_campaign.campaign_operation = campaign_operation
+    mutate_op_biz = client.get_type("MutateOperation")
+    mutate_op_biz.campaign_asset_operation = biz_ca_operation
+    mutate_op_logo = client.get_type("MutateOperation")
+    mutate_op_logo.campaign_asset_operation = logo_ca_operation
+
+    google_ads_service = client.get_service("GoogleAdsService")
+    batch_response = google_ads_service.mutate(
+        customer_id=customer_id_clean,
+        mutate_operations=[mutate_op_campaign, mutate_op_biz, mutate_op_logo],
+    )
+    campaign_resource_name = batch_response.mutate_operation_responses[0].campaign_result.resource_name
+
+    # 4. Segmentación geográfica e idioma
+    criterion_service = client.get_service("CampaignCriterionService")
+    criterion_ops = []
+    for loc_id in location_ids:
+        op = client.get_type("CampaignCriterionOperation")
+        crit = op.create
+        crit.campaign = campaign_resource_name
+        crit.location.geo_target_constant = f"geoTargetConstants/{loc_id}"
+        criterion_ops.append(op)
+    lang_op = client.get_type("CampaignCriterionOperation")
+    lang_crit = lang_op.create
+    lang_crit.campaign = campaign_resource_name
+    lang_crit.language.language_constant = f"languageConstants/{language_id}"
+    criterion_ops.append(lang_op)
+    criterion_service.mutate_campaign_criteria(customer_id=customer_id_clean, operations=criterion_ops)
+
+    # 5. Grupo de recursos (Asset Group)
+    asset_group_service = client.get_service("AssetGroupService")
+    ag_operation = client.get_type("AssetGroupOperation")
+    ag = ag_operation.create
+    ag.name = f"{campaign_name}_AssetGroup"
+    ag.campaign = campaign_resource_name
+    ag.final_urls.append(final_url)
+    ag.status = client.enums.AssetGroupStatusEnum.ENABLED
+    ag_response = asset_group_service.mutate_asset_groups(customer_id=customer_id_clean, operations=[ag_operation])
+    asset_group_resource_name = ag_response.results[0].resource_name
+
+    # 6. Vincular todos los assets al grupo de recursos
     asset_group_asset_service = client.get_service("AssetGroupAssetService")
     aga_ops = []
 
@@ -1861,26 +1888,7 @@ def create_performance_max_campaign(
         _link_asset(p_asset, "PORTRAIT_MARKETING_IMAGE")
     asset_group_asset_service.mutate_asset_group_assets(customer_id=customer_id_clean, operations=aga_ops)
 
-    # 7bis. Directrices de marca (Brand Guidelines) — si la cuenta las tiene activadas, Google exige
-    # además vincular el nombre del negocio y un logo cuadrado a nivel de CAMPAÑA (no solo al grupo
-    # de recursos). Si no subieron logo, se reutiliza la primera imagen cuadrada como logo de marca.
-    campaign_asset_service = client.get_service("CampaignAssetService")
-    ca_ops = []
-
-    def _link_campaign_asset(asset_resource_name, field_type_enum_name):
-        op = client.get_type("CampaignAssetOperation")
-        ca = op.create
-        ca.campaign = campaign_resource_name
-        ca.asset = asset_resource_name
-        ca.field_type = getattr(client.enums.AssetFieldTypeEnum, field_type_enum_name)
-        ca_ops.append(op)
-
-    _link_campaign_asset(business_name_asset, "BUSINESS_NAME")
-    brand_logo_asset = (logo_image_assets or square_image_assets)[0]
-    _link_campaign_asset(brand_logo_asset, "LOGO")
-    campaign_asset_service.mutate_campaign_assets(customer_id=customer_id_clean, operations=ca_ops)
-
-    # 8. Señales de tema de búsqueda (opcional) — le dicen a Google qué buscan las personas que
+    # 7. Señales de tema de búsqueda (opcional) — le dicen a Google qué buscan las personas que
     # queremos alcanzar; no reemplazan audiencias, pero son la señal más simple y confiable de Pmax.
     if search_themes:
         signal_service = client.get_service("AssetGroupSignalService")
