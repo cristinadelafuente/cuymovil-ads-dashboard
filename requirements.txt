@@ -6,3 +6,4 @@ google-analytics-data>=0.18.0
 google-auth>=2.29.0
 requests>=2.31.0
 google-ads>=24.1.0
+pillow>=10.0.0
