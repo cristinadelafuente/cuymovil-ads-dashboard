@@ -1770,7 +1770,7 @@ def create_performance_max_campaign(
     campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.PERFORMANCE_MAX
     campaign.status = client.enums.CampaignStatusEnum.PAUSED
     campaign.campaign_budget = budget_resource_name
-    campaign.maximize_conversions = client.get_type("MaximizeConversions")()
+    campaign.maximize_conversions = client.get_type("MaximizeConversions")
     campaign.contains_eu_political_advertising = (
         client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
     )
