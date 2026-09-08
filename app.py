@@ -1535,30 +1535,28 @@ def search_google_user_interests(query_text: str, limit: int = 15) -> pd.DataFra
     } for row in response]
     return pd.DataFrame(rows)
 
-def _gads_fit_image_to_ratio(image_bytes: bytes, target_ratio: float) -> bytes:
-    """Recorta (crop centrado) la imagen para que su relación de aspecto coincida exactamente
-    con la que exige Google Ads (p. ej. 1.0 para cuadrada/logo, 1.91 para horizontal),
-    evitando el error ASPECT_RATIO_NOT_ALLOWED."""
+def _gads_fit_image_to_ratio(image_bytes: bytes, target_size: tuple) -> bytes:
+    """Recorta (crop centrado) y reescala la imagen a un tamaño exacto en píxeles (p. ej.
+    1200x1200 para cuadrada/logo, 1200x628 para horizontal), garantizando el ratio exacto
+    que exige Google Ads y evitando el error ASPECT_RATIO_NOT_ALLOWED."""
+    target_w, target_h = target_size
+    target_ratio = target_w / target_h
     img = Image.open(BytesIO(image_bytes))
     img = img.convert("RGB")
     w, h = img.size
-    # Recorta siempre al ratio exacto (sin tolerancia): Google Ads no acepta desvíos, ni siquiera
-    # de 1-2 px, así que no nos arriesgamos a "dejar pasar" imágenes casi-cuadradas.
-    if target_ratio >= 1.0:
+    current_ratio = w / h
+    if current_ratio > target_ratio:
         new_h = h
-        new_w = int(h * target_ratio)
-        if new_w > w:
-            new_w = w
-            new_h = int(w / target_ratio)
+        new_w = int(round(h * target_ratio))
     else:
         new_w = w
-        new_h = int(w / target_ratio)
-        if new_h > h:
-            new_h = h
-            new_w = int(h * target_ratio)
+        new_h = int(round(w / target_ratio))
+    new_w = min(new_w, w)
+    new_h = min(new_h, h)
     left = (w - new_w) // 2
     top = (h - new_h) // 2
     img = img.crop((left, top, left + new_w, top + new_h))
+    img = img.resize((target_w, target_h), Image.LANCZOS)
     out = BytesIO()
     img.save(out, format="PNG")
     return out.getvalue()
@@ -1676,14 +1674,15 @@ def create_display_campaign(
     ad_group_resource_name = ad_group_response.results[0].resource_name
 
     # 5. Imágenes como Assets (se ajustan al ratio exacto que exige Google Ads antes de subirlas)
-    marketing_image_fitted = _gads_fit_image_to_ratio(marketing_image_bytes, 1.91)
-    square_image_fitted    = _gads_fit_image_to_ratio(square_image_bytes, 1.0)
-    marketing_image_asset = _gads_upload_image_asset(client, customer_id_clean, marketing_image_fitted, f"{campaign_name}_marketing_{int(datetime.now().timestamp())}")
-    square_image_asset    = _gads_upload_image_asset(client, customer_id_clean, square_image_fitted, f"{campaign_name}_square_{int(datetime.now().timestamp())}")
+    _ts = int(datetime.now().timestamp())
+    marketing_image_fitted = _gads_fit_image_to_ratio(marketing_image_bytes, (1200, 628))
+    square_image_fitted    = _gads_fit_image_to_ratio(square_image_bytes, (1200, 1200))
+    marketing_image_asset = _gads_upload_image_asset(client, customer_id_clean, marketing_image_fitted, f"{campaign_name}_marketing_{_ts}")
+    square_image_asset    = _gads_upload_image_asset(client, customer_id_clean, square_image_fitted, f"{campaign_name}_square_{_ts}")
     logo_image_asset = None
     if logo_image_bytes:
-        logo_image_fitted = _gads_fit_image_to_ratio(logo_image_bytes, 1.0)
-        logo_image_asset = _gads_upload_image_asset(client, customer_id_clean, logo_image_fitted, f"{campaign_name}_logo_{int(datetime.now().timestamp())}")
+        logo_image_fitted = _gads_fit_image_to_ratio(logo_image_bytes, (1200, 1200))
+        logo_image_asset = _gads_upload_image_asset(client, customer_id_clean, logo_image_fitted, f"{campaign_name}_logo_{_ts}")
 
     # 6. Anuncio de Display responsivo
     ad_group_ad_service = client.get_service("AdGroupAdService")
