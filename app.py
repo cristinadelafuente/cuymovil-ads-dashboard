@@ -3766,8 +3766,7 @@ elif nav_section == "🔍 Google Ads":
                     "Países *", list(GOOGLE_LOCATION_IDS.keys()), default=["Perú"],
                 )
                 gd_language_label = st.selectbox("Idioma *", list(GOOGLE_LANGUAGE_IDS.keys()))
-                gd_start_date = st.date_input("Fecha de inicio", value=date.today(), key="gd_start_date")
-                st.caption("La campaña se crea PAUSADA — define la fecha de inicio real en Google Ads al activarla.")
+                st.caption("La campaña se crea **PAUSADA** — define la fecha de inicio directamente en Google Ads al activarla.")
 
             st.markdown("**📝 Títulos** (mínimo 3, máximo 5 — hasta 30 caracteres c/u)")
             gd_headline_defaults = (DISPLAY_HEADLINES_BANK + [""] * 5)[:5]
@@ -3834,7 +3833,6 @@ elif nav_section == "🔍 Google Ads":
                             logo_image_bytes=gd_logo_image.getvalue() if gd_logo_image else None,
                             location_ids=[GOOGLE_LOCATION_IDS[c] for c in gd_locations_es],
                             language_id=GOOGLE_LANGUAGE_IDS[gd_language_label],
-                            start_date=gd_start_date,
                             age_range_keys=gd_age_keys,
                             gender_keys=gd_gender_keys,
                             user_list_resource_names=gd_selected_user_lists,
