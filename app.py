@@ -1581,8 +1581,8 @@ def create_display_campaign(
     campaign.network_settings.target_search_network = False
     campaign.network_settings.target_content_network = True
     campaign.network_settings.target_partner_search_network = False
-    if start_date:
-        campaign.start_date = start_date.strftime("%Y%m%d")
+    # Nota: la fecha de inicio no se fija por API — la campaña queda en PAUSADO y arranca a correr
+    # (según su fecha de inicio real en Google Ads, por defecto "hoy") recién cuando la actives ahí.
     campaign_response = campaign_service.mutate_campaigns(customer_id=customer_id_clean, operations=[campaign_operation])
     campaign_resource_name = campaign_response.results[0].resource_name
 
@@ -3767,6 +3767,7 @@ elif nav_section == "🔍 Google Ads":
                 )
                 gd_language_label = st.selectbox("Idioma *", list(GOOGLE_LANGUAGE_IDS.keys()))
                 gd_start_date = st.date_input("Fecha de inicio", value=date.today(), key="gd_start_date")
+                st.caption("La campaña se crea PAUSADA — define la fecha de inicio real en Google Ads al activarla.")
 
             st.markdown("**📝 Títulos** (mínimo 3, máximo 5 — hasta 30 caracteres c/u)")
             gd_headline_defaults = (DISPLAY_HEADLINES_BANK + [""] * 5)[:5]
