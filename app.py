@@ -14,6 +14,8 @@ import json
 import os
 import tempfile
 import requests
+from io import BytesIO
+from PIL import Image
 from datetime import datetime, timezone, date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -1533,6 +1535,29 @@ def search_google_user_interests(query_text: str, limit: int = 15) -> pd.DataFra
     } for row in response]
     return pd.DataFrame(rows)
 
+def _gads_fit_image_to_ratio(image_bytes: bytes, target_ratio: float) -> bytes:
+    """Recorta (crop centrado) la imagen para que su relación de aspecto coincida exactamente
+    con la que exige Google Ads (p. ej. 1.0 para cuadrada/logo, 1.91 para horizontal),
+    evitando el error ASPECT_RATIO_NOT_ALLOWED."""
+    img = Image.open(BytesIO(image_bytes))
+    img = img.convert("RGB")
+    w, h = img.size
+    current_ratio = w / h
+    if abs(current_ratio - target_ratio) < 0.01:
+        new_w, new_h = w, h
+    elif current_ratio > target_ratio:
+        new_h = h
+        new_w = int(round(h * target_ratio))
+    else:
+        new_w = w
+        new_h = int(round(w / target_ratio))
+    left = (w - new_w) // 2
+    top = (h - new_h) // 2
+    img = img.crop((left, top, left + new_w, top + new_h))
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
 def _gads_upload_image_asset(client, customer_id: str, image_bytes: bytes, asset_name: str) -> str:
     """Sube una imagen como Asset de Google Ads y devuelve su resource_name."""
     asset_service = client.get_service("AssetService")
@@ -1645,12 +1670,15 @@ def create_display_campaign(
     ad_group_response = ad_group_service.mutate_ad_groups(customer_id=customer_id_clean, operations=[ad_group_operation])
     ad_group_resource_name = ad_group_response.results[0].resource_name
 
-    # 5. Imágenes como Assets
-    marketing_image_asset = _gads_upload_image_asset(client, customer_id_clean, marketing_image_bytes, f"{campaign_name}_marketing_{int(datetime.now().timestamp())}")
-    square_image_asset    = _gads_upload_image_asset(client, customer_id_clean, square_image_bytes, f"{campaign_name}_square_{int(datetime.now().timestamp())}")
+    # 5. Imágenes como Assets (se ajustan al ratio exacto que exige Google Ads antes de subirlas)
+    marketing_image_fitted = _gads_fit_image_to_ratio(marketing_image_bytes, 1.91)
+    square_image_fitted    = _gads_fit_image_to_ratio(square_image_bytes, 1.0)
+    marketing_image_asset = _gads_upload_image_asset(client, customer_id_clean, marketing_image_fitted, f"{campaign_name}_marketing_{int(datetime.now().timestamp())}")
+    square_image_asset    = _gads_upload_image_asset(client, customer_id_clean, square_image_fitted, f"{campaign_name}_square_{int(datetime.now().timestamp())}")
     logo_image_asset = None
     if logo_image_bytes:
-        logo_image_asset = _gads_upload_image_asset(client, customer_id_clean, logo_image_bytes, f"{campaign_name}_logo_{int(datetime.now().timestamp())}")
+        logo_image_fitted = _gads_fit_image_to_ratio(logo_image_bytes, 1.0)
+        logo_image_asset = _gads_upload_image_asset(client, customer_id_clean, logo_image_fitted, f"{campaign_name}_logo_{int(datetime.now().timestamp())}")
 
     # 6. Anuncio de Display responsivo
     ad_group_ad_service = client.get_service("AdGroupAdService")
