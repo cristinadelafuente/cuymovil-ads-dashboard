@@ -3027,10 +3027,26 @@ elif nav_section == "📊 Meta Ads":
     # TAB 1 — DASHBOARD
     # ══════════════════════════════════════════════════════════════════════════════
     with tab_dash:
+        meta_load_error = None
         with st.spinner("Cargando datos de Meta Ads..."):
-            df = fetch_campaigns(account_id, date_preset, since_str, until_str)
+            try:
+                df = fetch_campaigns(account_id, date_preset, since_str, until_str)
+            except Exception as e:
+                df = pd.DataFrame()
+                meta_load_error = e
 
-        if df.empty:
+        if meta_load_error is not None:
+            _e = meta_load_error
+            _msg = _e.api_error_message() if hasattr(_e, "api_error_message") else str(_e)
+            _code = _e.api_error_code() if hasattr(_e, "api_error_code") else ""
+            st.error(f"No se pudo leer la cuenta **{account_label}** (`{account_id}`) en Meta. "
+                     f"{('Código ' + str(_code) + ': ') if _code else ''}{_msg}")
+            st.info(
+                "Lo más común: el `ACCESS_TOKEN` no tiene acceso a esta cuenta publicitaria. En Business Settings → "
+                "Usuarios → Usuarios del sistema → tu usuario → **Agregar activos**, agrega esta cuenta publicitaria "
+                "(y la página de Facebook) con control total, y vuelve a intentar. Verifica también que el ID `act_` sea el correcto."
+            )
+        elif df.empty:
             st.info("No hay datos disponibles para este período y cuenta.")
         else:
             raw_view_df = df if show_paused else df[df["Estado"] == "ACTIVE"]
