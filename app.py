@@ -176,6 +176,28 @@ ACCOUNTS = {
     "Cuy Móvil (histórico)":            "act_10159339378105150",
 }
 
+# Cuentas de Meta adicionales (otras marcas) — se configuran en Streamlit Cloud → Settings → Secrets,
+# sin tocar el código. Cada una trae su cuenta publicitaria y su página de Facebook propia:
+#   [META_EXTRA_ACCOUNTS."Wings"]
+#   account_id = "act_1234567890"
+#   page_id    = "1122334455"
+# El ACCESS_TOKEN actual debe tener acceso a esa cuenta publicitaria y a esa página.
+ACCOUNT_PAGE_IDS = {}   # account_id -> page_id (si una cuenta no aparece aquí, usa el PAGE_ID global)
+_EXTRA_RAW = get_secret("META_EXTRA_ACCOUNTS")
+try:
+    for _label, _cfg in (_EXTRA_RAW.items() if _EXTRA_RAW else []):
+        _cfg = dict(_cfg)
+        _acc = str(_cfg.get("account_id", "")).strip()
+        if not _acc:
+            continue
+        if not _acc.startswith("act_"):
+            _acc = "act_" + _acc
+        ACCOUNTS[str(_label)] = _acc
+        if _cfg.get("page_id"):
+            ACCOUNT_PAGE_IDS[_acc] = str(_cfg["page_id"]).strip()
+except Exception:
+    pass
+
 DATE_OPTIONS = {
     "Últimos 7 días":  "last_7d",
     "Últimos 14 días": "last_14d",
@@ -3175,7 +3197,9 @@ elif nav_section == "📊 Meta Ads":
             )
 
             # Page ID
-            page_id_input = PAGE_ID or ""
+            page_id_input = ACCOUNT_PAGE_IDS.get(account_id) or PAGE_ID or ""
+            if account_id in ACCOUNT_PAGE_IDS:
+                st.caption(f"📄 Publicando con la página de Facebook de **{account_label}** (ID `{page_id_input}`).")
             if not page_id_input:
                 st.warning("Configura `PAGE_ID` en Streamlit Cloud → Settings → Secrets con el ID de tu página de Facebook.")
                 page_id_input = st.text_input(
@@ -3614,7 +3638,7 @@ elif nav_section == "📊 Meta Ads":
             st.session_state["grid_generated"] = True
 
         if IS_ADMIN and st.session_state.get("grid_generated"):
-            grid_page_id = PAGE_ID or globals().get("page_id_input", "")
+            grid_page_id = ACCOUNT_PAGE_IDS.get(account_id) or PAGE_ID or globals().get("page_id_input", "")
             if not grid_page_id:
                 st.warning(
                     "No se detectó `PAGE_ID` en Secrets — la parte de contenido orgánico usará solo buenas "
